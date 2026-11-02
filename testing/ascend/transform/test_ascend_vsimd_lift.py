@@ -22,6 +22,8 @@ def _programs(mod):
                 found.append(node.annotations[PROGRAM_KEY])
 
     tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
+    for program in found:
+        assert "validation_error" not in program
     return found
 
 
@@ -273,6 +275,52 @@ def test_nested_parallel_without_top_level_is_all_opaque():
     assert items
     assert all(item["status"] == "OPAQUE" for item in items)
     assert all(item["group_status"] == "OPAQUE" for item in items)
+
+
+def test_nested_parallel_keeps_metadata_preserve_in_all_opaque_program():
+    n = 64
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), "float32"), C: T.Tensor((n,), "float32")):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((n,), "float32")
+            T.copy(A, a_ub)
+            with T.SimdVF():
+                for w in T.serial(2):
+                    for i in T.Parallel(n):
+                        a_ub[i] = 1.0 + w
+            T.copy(a_ub, C)
+
+    view = tvm.tirx.decl_buffer((n,), "float32", name="v", scope="shared")
+    decl = tvm.tirx.DeclBuffer(view)
+
+    def inject(node):
+        if isinstance(node, tvm.tirx.SBlock) and node.name_hint == "SIMD_VF":
+            return tvm.tirx.SBlock(
+                node.iter_vars,
+                node.reads,
+                node.writes,
+                node.name_hint,
+                tvm.tirx.SeqStmt([decl, node.body]),
+                node.init,
+                node.alloc_buffers,
+                node.match_buffers,
+                node.annotations,
+            )
+        return None
+
+    body = tvm.tirx.stmt_functor.ir_transform(main.body, None, inject)
+    programs = _programs(_lift(main.with_body(body)))
+    assert len(programs) == 1
+    items = _items(programs[0])
+    _assert_dense_spans(items)
+    assert [item["kind"] for item in items] == ["DECL", "OPAQUE"]
+    # The all-OPAQUE fallback must leave metadata items PRESERVE: clobbering
+    # them to OPAQUE breaks the metadata/preserve invariant that the P1
+    # verifier (and P2's reader) enforces.
+    assert items[0]["status"] == "PRESERVE"
+    assert items[0]["group_status"] == "PRESERVE"
+    assert items[1]["status"] == "OPAQUE"
 
 
 def test_assume_is_program_metadata():

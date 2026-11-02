@@ -27,6 +27,7 @@
 
 #include "vsimd_capture_scope.h"
 #include "vsimd_memory_legality.h"
+#include "vsimd_program.h"
 #include "vsimd_region.h"
 
 namespace tvm {
@@ -881,6 +882,11 @@ static Map<String, Any> BuildProgram(const SBlock &vf, int vf_index,
         << "AscendLiftVSimd: VF has a Parallel nest but no top-level "
            "T.Parallel; attaching an all-OPAQUE program";
     for (ItemRecord &item : items) {
+      // Metadata items (BIND/ALLOC/DECL) are not liftable work; they must stay
+      // PRESERVE so the program keeps its metadata/preserve invariant (a
+      // PRESERVE item in an all-OPAQUE VF is still copied verbatim by P2).
+      if (item.is_metadata)
+        continue;
       item.p1_liftable = false;
       item.analysis_status = "OPAQUE";
     }
@@ -992,6 +998,13 @@ static Map<String, Any> BuildProgram(const SBlock &vf, int vf_index,
               Any(Array<Map<String, Any>>(captures.begin(), captures.end())));
   program.Set("fragments", Any(Array<Map<String, Any>>(fragments.begin(),
                                                        fragments.end())));
+  VSimdProgram typed;
+  std::string validation_error;
+  if (!ReadVSimdProgram(program, &typed, &validation_error)) {
+    LOG(WARNING) << "AscendLiftVSimd: invalid VSimdProgram: "
+                 << validation_error;
+    program.Set("validation_error", Any(String(validation_error)));
+  }
   return program;
 }
 
