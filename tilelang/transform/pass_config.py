@@ -73,6 +73,9 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
+    TL_ASCEND_SIMD_LIFT = "tl.ascend_simd_lift"
+    """Enable the P1 VSimdProgram metadata pass on Ascend. Default: True."""
+
     TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
     """Enable Ascend auto scheduling. Default: True."""
 

@@ -74,16 +74,13 @@ def parallel_flash_attention_fwd(
             pv_acc_l0c = T.alloc_l0c((BR, D), accum_dtype)
 
             S_ub = T.alloc_shared((BR, BC_TILE), accum_dtype)
-            P_ub = T.alloc_shared((BR, BC_TILE), accum_dtype)
             P_nz_ub = T.alloc_shared((BR + 1, BC_TILE), dtype)
             T.annotate_layout({P_nz_ub: make_ascend_compact_nz_layout(P_nz_ub)})
             O_tmp_ub = T.alloc_shared((BR, D), accum_dtype)
             O_ub = T.alloc_shared((BR, D), accum_dtype)
 
             m_old = T.alloc_shared((BR,), accum_dtype)
-            m_new = T.alloc_shared((BR,), accum_dtype)
             l_old = T.alloc_shared((BR,), accum_dtype)
-            l_cur = T.alloc_shared((BR,), accum_dtype)
             alpha = T.alloc_shared((BR,), accum_dtype)
 
             T.copy(Q, Q_shared)
@@ -109,31 +106,29 @@ def parallel_flash_attention_fwd(
 
                 # Scale and row max for this KV block.
                 with T.SimdVF():
+                    S_frag = T.alloc_fragment((BR, BC_TILE), accum_dtype)
+                    P_frag = T.alloc_fragment((BR, BC_TILE), accum_dtype)
+                    m_new = T.alloc_fragment((BR,), accum_dtype)
+                    l_cur = T.alloc_fragment((BR,), accum_dtype)
+                    alpha_frag = T.alloc_fragment((BR,), accum_dtype)
                     for i, j in T.Parallel(BR, BC_TILE):
-                        S_ub[i, j] = S_ub[i, j] * scale
-                # Merge running max: m_new = max(m_old, rowmax(S)).
-                T.copy(m_old, m_new)
-                with T.SimdVF():
-                    T.reduce_max(S_ub, m_new, dim=1, clear=False)
-
-                # Rescale factor for the online-softmax update.
-                with T.SimdVF():
+                        S_frag[i, j] = S_ub[i, j] * scale
+                    # Merge running max: m_new = max(m_old, rowmax(S)).
+                    T.copy(m_old, m_new)
+                    T.reduce_max(S_frag, m_new, dim=1, clear=False)
+                    # Rescale factor for the online-softmax update.
                     for i in T.Parallel(BR):
-                        alpha[i] = T.exp(m_old[i] - m_new[i])
-
-                # Parallel softmax and the layout-aware direct NZ store.
-                with T.SimdVF():
+                        alpha_frag[i] = T.exp(m_old[i] - m_new[i])
+                        alpha[i] = alpha_frag[i]
+                    # Parallel softmax and the layout-aware direct NZ store.
                     for i, j in T.Parallel(BR, BC_TILE):
-                        P_ub[i, j] = T.exp(S_ub[i, j] - m_new[i])
-                        P_nz_ub[i, j] = T.cast(P_ub[i, j], dtype)
-                with T.SimdVF():
-                    T.reduce_sum(P_ub, l_cur, dim=1, clear=True)
-
-                # l_new = l_old * alpha + rowsum(P)
-                with T.SimdVF():
+                        P_frag[i, j] = T.exp(S_frag[i, j] - m_new[i])
+                        P_nz_ub[i, j] = T.cast(P_frag[i, j], dtype)
+                    T.reduce_sum(P_frag, l_cur, dim=1, clear=True)
+                    # l_new = l_old * alpha + rowsum(P)
                     for i in T.Parallel(BR):
-                        l_old[i] = l_old[i] * alpha[i] + l_cur[i]
-                T.copy(m_new, m_old)
+                        l_old[i] = l_old[i] * alpha_frag[i] + l_cur[i]
+                    T.copy(m_new, m_old)
 
                 # Feed the NZ probabilities to the second GEMM.
                 T.copy(P_nz_ub[0:BR, 0:BC_TILE], P_shared[0:BR, 0:BC_TILE])

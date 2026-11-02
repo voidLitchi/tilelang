@@ -118,6 +118,8 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
 
     mod = ascend_transform.NormalizeBufferVersion()(mod)
+    if pass_ctx.config.get(tilelang.PassConfigKey.TL_ASCEND_SIMD_LIFT, True):
+        mod = ascend_transform.AscendLiftVSimd()(mod)
     mod = ascend_transform.AscendSimdVFLowerParallel()(mod)
     mod = ascend_transform.AscendLowerTileOp()(mod)
     mod = tilelang.transform.VerifyReducerConsumed()(mod)

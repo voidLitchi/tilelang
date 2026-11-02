@@ -57,6 +57,27 @@ def AscendAnalyzeVSimdRegion():
     return _ffi_api.AscendAnalyzeVSimdRegion()  # type: ignore
 
 
+def AscendAnalyzeVSimdFragmentReport(func):
+    """Return the per-VF fragment whitelist/table report for a PrimFunc.
+
+    The report lists the op whitelist status of every ``SIMD_VF`` and the
+    fragment table (defs/uses, cross-VF use, tileop def/use). It does not
+    modify the IR: ``local.fragment`` is register-level storage, and P2/P3 own
+    the physical realization (register/spill/reject).
+    """
+    return _ffi_api.AscendAnalyzeVSimdFragmentReport(func)  # type: ignore
+
+
+def AscendAnalyzeVSimdFragment():
+    """Read-only debug pass: log the P1 fragment whitelist/table report."""
+    return _ffi_api.AscendAnalyzeVSimdFragment()  # type: ignore
+
+
+def AscendLiftVSimd():
+    """P1 metadata pass: attach per-VF VSimdProgram annotations."""
+    return _ffi_api.AscendLiftVSimd()  # type: ignore
+
+
 def InsertNd2Nz():
     """Rewrite layout-driven UB ND->UB NZ and UB->L1 ND->NZ copies."""
     return _ffi_api.InsertNd2Nz()  # type: ignore
@@ -283,7 +304,10 @@ __all__ = [
     "AscendAnalyzeSimdVFCapture",
     "AscendAnalyzeSimdVFCaptureReport",
     "AscendAnalyzeSimdVFCaptureInfo",
+    "AscendAnalyzeVSimdFragment",
+    "AscendAnalyzeVSimdFragmentReport",
     "AscendAnalyzeVSimdRegion",
+    "AscendLiftVSimd",
     "AscendAnalyzeVSimdRegionReport",
     "AscendSimdVFLowerParallel",
     "AscendThreadSync",
