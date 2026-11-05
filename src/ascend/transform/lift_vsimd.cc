@@ -347,18 +347,6 @@ struct ProgramInputs {
   VarSet outside_fragment_uses;
 };
 
-static String StorageKind(const Buffer &buffer) {
-  if (!buffer.defined())
-    return String("UNKNOWN");
-  const std::string scope = buffer.scope();
-  if (scope == "local.fragment")
-    return String("FRAGMENT");
-  if (scope.find("shared") != std::string::npos)
-    return String("SHARED");
-  if (scope == "global")
-    return String("GLOBAL");
-  return String("UNKNOWN");
-}
 
 static Map<String, Any> BufferInfo(const Buffer &buffer) {
   Map<String, Any> info;
@@ -371,7 +359,7 @@ static Map<String, Any> BufferInfo(const Buffer &buffer) {
   for (const PrimExpr &extent : buffer->shape)
     shape.push_back(std::string(ExprStr(extent)));
   info.Set("shape", Any(ToStrings(shape)));
-  info.Set("scope", Any(StorageKind(buffer)));
+  info.Set("scope", Any(StorageKindOf(buffer)));
   return info;
 }
 
@@ -391,97 +379,6 @@ static void SetAccessMeta(ItemRecord *rec) {
                 Any(Array<Buffer>(rec->writes.begin(), rec->writes.end())));
 }
 
-static Map<String, Any> RegionPayload(const VSimdRegion &region) {
-  Map<String, Any> map;
-
-  std::vector<Map<String, Any>> domain;
-  for (const LoopInfo &loop : region.domain) {
-    Map<String, Any> axis;
-    axis.Set("var", Any(loop.var));
-    axis.Set("min", Any(loop.min));
-    axis.Set("extent", Any(loop.extent));
-    domain.push_back(axis);
-  }
-
-  std::vector<Map<String, Any>> accesses;
-  for (const VSimdAccess &wrapped : region.accesses) {
-    Map<String, Any> access;
-    access.Set("buffer", Any(wrapped.access.buffer));
-    access.Set("indices", Any(wrapped.access.indices));
-    access.Set("value", Any(wrapped.access.value));
-    access.Set("is_write", Any(Bool(wrapped.access.is_write)));
-    access.Set("dep_axes", Any(ToInts(wrapped.dep_axes)));
-    access.Set("value_axes", Any(ToInts(wrapped.value_axes)));
-    access.Set("value_shape",
-               Any(Array<PrimExpr>(wrapped.value_shape.begin(),
-                                   wrapped.value_shape.end())));
-    access.Set("has_layout", Any(Bool(wrapped.has_layout)));
-    if (wrapped.has_layout)
-      access.Set("layout", Any(wrapped.layout));
-    accesses.push_back(access);
-  }
-
-  std::vector<Map<String, Any>> captures;
-  for (const auto &capture : region.captures) {
-    Map<String, Any> item;
-    item.Set("buffer", Any(capture.first));
-    item.Set("kind", Any(String(capture.second)));
-    item.Set("storage", Any(StorageKind(capture.first)));
-    captures.push_back(item);
-  }
-
-  std::vector<Map<String, Any>> outer_vars;
-  for (const auto &var : region.outer_vars) {
-    Map<String, Any> item;
-    item.Set("var", Any(var.first));
-    item.Set("kind", Any(String(var.second)));
-    outer_vars.push_back(item);
-  }
-
-  std::vector<Map<String, Any>> local_views;
-  for (const auto &view : region.local_views) {
-    Map<String, Any> item;
-    item.Set("view", Any(view.first));
-    item.Set("base", Any(view.second));
-    local_views.push_back(item);
-  }
-
-  std::vector<Map<String, Any>> layouts;
-  for (const auto &layout : region.layouts) {
-    Map<String, Any> item;
-    item.Set("buffer", Any(layout.first));
-    item.Set("layout", Any(layout.second));
-    layouts.push_back(item);
-  }
-
-  std::vector<Map<String, Any>> bindings;
-  for (const auto &binding : region.bindings) {
-    Map<String, Any> item;
-    item.Set("var", Any(binding.first));
-    item.Set("value", Any(binding.second));
-    bindings.push_back(item);
-  }
-
-  map.Set("domain", Any(Array<Map<String, Any>>(domain.begin(), domain.end())));
-  map.Set("accesses",
-          Any(Array<Map<String, Any>>(accesses.begin(), accesses.end())));
-  map.Set("captures",
-          Any(Array<Map<String, Any>>(captures.begin(), captures.end())));
-  map.Set("outer_vars",
-          Any(Array<Map<String, Any>>(outer_vars.begin(), outer_vars.end())));
-  map.Set("shape_syms", Any(Array<Var>(region.shape_syms.begin(),
-                                       region.shape_syms.end())));
-  map.Set("local_views",
-          Any(Array<Map<String, Any>>(local_views.begin(), local_views.end())));
-  map.Set("layouts",
-          Any(Array<Map<String, Any>>(layouts.begin(), layouts.end())));
-  map.Set("assumptions", Any(Array<PrimExpr>(region.assumptions.begin(),
-                                             region.assumptions.end())));
-  map.Set("bindings",
-          Any(Array<Map<String, Any>>(bindings.begin(), bindings.end())));
-  map.Set("dump", Any(String(DumpVSimdRegion(region))));
-  return map;
-}
 
 struct TileRegionInfo {
   Buffer buffer;
@@ -573,7 +470,7 @@ static void AddRegionItem(std::vector<ItemRecord> *items,
                           const VSimdCaptureInfo &info,
                           const std::string &memory_status, int span) {
   ItemRecord rec;
-  VSimdRegionLift lift = BuildMinimalRegion(info, memory_status);
+  VSimdRegionLift lift = BuildRegion(info, memory_status);
   std::string status = lift.lifted ? "LIFTED" : "OPAQUE";
   rec.p1_liftable = lift.lifted;
   rec.analysis_status = status;
@@ -585,7 +482,7 @@ static void AddRegionItem(std::vector<ItemRecord> *items,
   rec.meta.Set("parallel_nest_index", Any(Integer(info.nest_index)));
   rec.meta.Set("reason", Any(String(lift.reason)));
   if (lift.lifted)
-    rec.meta.Set("region", Any(RegionPayload(lift.region)));
+    rec.meta.Set("region", Any(lift.region));
   for (const AccessInfo &acc : info.accesses) {
     if (acc.is_write)
       AddBufferUnique(&rec.writes, acc.buffer);
@@ -661,7 +558,7 @@ static void AddBufferDeclItem(std::vector<ItemRecord> *items,
   rec.meta.Set("span_end", Any(Integer(span + 1)));
   rec.meta.Set("status", Any(String("PRESERVE")));
   rec.meta.Set("buffer", Any(buffer));
-  rec.meta.Set("storage", Any(StorageKind(buffer)));
+  rec.meta.Set("storage", Any(StorageKindOf(buffer)));
   SetAccessMeta(&rec);
   items->push_back(std::move(rec));
 }
@@ -932,7 +829,7 @@ static Map<String, Any> BuildProgram(const SBlock &vf, int vf_index,
       Map<String, Any> capture;
       capture.Set("buffer", Any(buffer));
       capture.Set("name", Any(String(buffer->name)));
-      capture.Set("storage", Any(StorageKind(buffer)));
+      capture.Set("storage", Any(StorageKindOf(buffer)));
       captures.push_back(capture);
     }
   }

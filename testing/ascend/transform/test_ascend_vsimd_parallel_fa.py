@@ -30,7 +30,7 @@ def test_parallel_fa_direct_nz_store_lifts():
     report = _report(func)
 
     assert "status=LIFTED" in report
-    assert "domain: i in [0, 128) j in [0, 128)" in report
+    assert "axes: i in [0, 128) j in [0, 128)" in report
     assert "W P_nz_ub[i, j] = T.Cast(" in report
     assert "layout=annotated" in report
     assert "layouts:" in report

@@ -248,7 +248,7 @@ def test_parallel_ordinal_matches_capture_under_serial():
     assert items[0]["kind"] == "OPAQUE"
     assert items[1]["kind"] == "REGION"
     assert items[1]["parallel_nest_index"] == 1
-    assert [int(x["extent"]) for x in items[1]["region"]["domain"]] == [64]
+    assert [int(axis.extent) for axis in items[1]["region"].axes] == [64]
 
 
 def test_nested_parallel_without_top_level_is_all_opaque():

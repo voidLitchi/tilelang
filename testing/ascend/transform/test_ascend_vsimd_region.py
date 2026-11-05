@@ -27,7 +27,7 @@ def test_simple_region_lifted():
 
     report = _report(main)
     assert "status=LIFTED" in report
-    assert "domain: i in [0, 64)" in report
+    assert "axes: i in [0, 64)" in report
     assert "captures:" in report
     assert "W c_ub[i] = a_ub[i]" in report
     assert "expanded:" in report
@@ -51,9 +51,9 @@ def test_2d_lifted():
 
     report = _report(main)
     assert "status=LIFTED" in report
-    assert "domain: i in [0, 8) j in [0, 64)" in report
+    assert "axes: i in [0, 8) j in [0, 64)" in report
     assert "W c_ub[i, j] = a_ub[i, j]" in report
-    assert "shape=[8,64] axes=[0,1] dep={0,1}" in report
+    assert "W c_ub[i, j] = a_ub[i, j] + T.float32(1.0) dep={0,1}" in report
     assert "T.grid(8, 64)" in report
     assert "verify: OK" in report
 
@@ -80,8 +80,8 @@ def test_2d_broadcast_dep_axes():
 
     report = _report(main)
     assert "status=LIFTED" in report
-    assert "R bias_ub[j] shape=[8,64] axes=[0,1] dep={1}" in report
-    assert "R a_ub[i, j] shape=[8,64] axes=[0,1] dep={0,1}" in report
+    assert "R bias_ub[j] dep={1}" in report
+    assert "R a_ub[i, j] dep={0,1}" in report
     assert "verify: OK" in report
 
 
@@ -101,7 +101,7 @@ def test_2d_transpose_map():
 
     report = _report(main)
     assert "status=LIFTED" in report
-    assert "R a_ub[j, i] shape=[8,64] axes=[0,1] dep={0,1}" in report
+    assert "R a_ub[j, i] dep={0,1}" in report
     assert "verify: OK" in report
 
 
@@ -178,7 +178,7 @@ def test_tail_region_lifted():
 
     report = _report(main)
     assert "status=LIFTED" in report
-    assert "domain: i in" in report
+    assert "axes: i in" in report
 
 
 def test_dynamic_shape_symbols_lifted():
@@ -330,7 +330,7 @@ def test_3d_lifted():
     report = _report(main)
     assert "status=LIFTED" in report
     assert "T.grid(2, 8, 16)" in report
-    assert "shape=[2,8,16] axes=[0,1,2] dep={0,1,2}" in report
+    assert "dep={0,1,2}" in report
     assert "verify: OK" in report
 
 
@@ -354,7 +354,7 @@ def test_4d_recursive_lift():
     report = _report(main)
     assert "status=LIFTED" in report
     assert "T.grid(2, 2, 4, 8)" in report
-    assert "shape=[2,2,4,8] axes=[0,1,2,3] dep={0,1,2,3}" in report
+    assert "dep={0,1,2,3}" in report
     assert "verify: OK" in report
 
 
