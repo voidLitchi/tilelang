@@ -1,4 +1,11 @@
-"""Structural tests for the parallel-softmax FA closed-loop tile (PR-E)."""
+"""Structural tests for the parallel-softmax FA closed-loop tile (PR-E).
+
+``parallel_fa.py`` is the fragment-based variant of this tile. It is superseded
+as the P1 target by the target-DSL variant (one outer row ``T.Parallel`` with
+row-slice ``T.reduce``); P1 coverage for that shape is added when nested ops
+become liftable. Until then this file keeps the layout-aware direct-store
+regression on the fragment variant.
+"""
 
 import pathlib
 import sys
@@ -28,8 +35,8 @@ def test_parallel_fa_direct_nz_store_lifts():
     assert "layout=annotated" in report
     assert "layouts:" in report
     assert "verify: OK" in report
-    # The P_nz store must be in the same region as the P_ub store.
-    assert "W P_ub[i, j] = T.exp" in report
+    # The P_nz store must be in the same region as the probability store.
+    assert "W P_frag[i, j] = T.exp" in report
 
 
 def test_parallel_fa_scope_has_layout():

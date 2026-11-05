@@ -25,13 +25,6 @@ namespace tl {
  */
 TVM_DLL ffi::String AnalyzeVSimdMemoryLegality(const tirx::PrimFunc &func);
 
-/*!
- * \brief Return per-VF statuses in the same order as the report:
- * LEGAL / ILLEGAL / UNPROVEN / UNSUPPORTED / OPAQUE.
- */
-TVM_DLL std::vector<std::string>
-AnalyzeVSimdMemoryStatuses(const tirx::PrimFunc &func);
-
 /*! \brief Per-VF/per-nest legality status for per-Region fallback. */
 struct VSimdMemoryRegionStatus {
   int vf_index{-1};

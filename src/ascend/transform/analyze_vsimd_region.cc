@@ -1,6 +1,6 @@
 /*!
  * \file analyze_vsimd_region.cc
- * \brief Debug pass / FFI entry for the PR-C minimal region lift.
+ * \brief Debug pass / FFI entry for the region lift report.
  */
 #include "vsimd_region.h"
 

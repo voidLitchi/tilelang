@@ -1,6 +1,6 @@
 /*!
  * \file vsimd_region.cc
- * \brief Minimal 1-D VSimdRegion builder, dumper, and reference expander.
+ * \brief VSimdRegion builder, dumper, and reference expander.
  */
 #include "vsimd_region.h"
 
@@ -164,16 +164,6 @@ VSimdRegionLift BuildMinimalRegion(const VSimdCaptureInfo &info,
   return result;
 }
 
-VSimdRegionLift BuildMinimal1DRegion(const VSimdCaptureInfo &info,
-                                     const std::string &memory_status) {
-  if (info.domain.size() != 1) {
-    VSimdRegionLift result;
-    result.reason = "PR-C minimal lift only supports one T.Parallel level";
-    return result;
-  }
-  return BuildMinimalRegion(info, memory_status);
-}
-
 std::string DumpVSimdRegion(const VSimdRegion &region) {
   std::ostringstream os;
   os << "region VF#" << region.vf_index << " nest#" << region.nest_index
@@ -247,13 +237,6 @@ Stmt ExpandVSimdRegionToLoops(const VSimdRegion &region) {
     result = SeqStmt({DeclBuffer(it->first), result});
   }
   return result;
-}
-
-Stmt BuildVSimdRegionCarrier(const VSimdRegion &region) {
-  // Debug-only carrier. It is not executable and never enters the default
-  // pipeline; the executable P2/P3 carrier will consume VSimdRegion directly.
-  return AttrStmt(StringImm(DumpVSimdRegion(region)), "tl.vsimd.region", 1,
-                  Evaluate(0));
 }
 
 VSimdRegionVerify VerifyExpandedRegion(const VSimdRegion &region,
@@ -369,7 +352,8 @@ VSimdRegionVerify VerifyExpandedRegion(const VSimdRegion &region,
 }
 
 String AnalyzeVSimdRegionReport(const PrimFunc &func) {
-  std::vector<std::string> statuses = AnalyzeVSimdMemoryStatuses(func);
+  std::vector<VSimdMemoryRegionStatus> memory_regions =
+      AnalyzeVSimdMemoryRegions(func);
   std::vector<VSimdCaptureInfo> infos = AnalyzeVSimdCaptureInfo(func);
 
   std::ostringstream out;
@@ -381,11 +365,16 @@ String AnalyzeVSimdRegionReport(const PrimFunc &func) {
       out << "\n";
       continue;
     }
-    std::string memory_status =
-        info.vf_index >= 0 &&
-                static_cast<size_t>(info.vf_index) < statuses.size()
-            ? statuses[info.vf_index]
-            : "MISSING";
+    // Gate each nest on its own legality status: an illegal sibling nest must
+    // not disable a legal one (the P1 pass already works per nest).
+    std::string memory_status = "MISSING";
+    for (const VSimdMemoryRegionStatus &status : memory_regions) {
+      if (status.vf_index == info.vf_index &&
+          status.nest_index == info.nest_index) {
+        memory_status = status.status;
+        break;
+      }
+    }
     VSimdRegionLift lift = BuildMinimalRegion(info, memory_status);
     out << "VF#" << info.vf_index << " nest " << info.nest_index << ": ";
     if (!lift.lifted) {
@@ -403,9 +392,6 @@ String AnalyzeVSimdRegionReport(const PrimFunc &func) {
     expanded << expanded_stmt;
     out << "  expanded:\n    " << expanded.str() << "\n";
     out << "  verify: OK\n";
-    std::ostringstream carrier;
-    carrier << BuildVSimdRegionCarrier(lift.region);
-    out << "  carrier:\n    " << carrier.str() << "\n";
   }
   if (out.str().empty())
     return String("no SIMD_VF blocks\n");

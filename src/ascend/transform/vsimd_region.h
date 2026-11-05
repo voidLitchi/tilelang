@@ -1,6 +1,6 @@
 /*!
  * \file vsimd_region.h
- * \brief VSimdRegion carrier, dumper, and reference expander (PR-C/PR-D).
+ * \brief VSimdRegion carrier, dumper, and reference expander.
  */
 #ifndef TVM_TL_ASCEND_TRANSFORM_VSIMD_REGION_H_
 #define TVM_TL_ASCEND_TRANSFORM_VSIMD_REGION_H_
@@ -48,9 +48,7 @@ struct VSimdAccess {
  *
  * The region is the typed hand-off from P1 to the later P2/P3 stages. It keeps
  * the logical access maps and store values; it does not contain physical
- * layout, lane, or instruction choices. The TIR side is a debug-only AttrStmt
- * carrier (see BuildVSimdRegionCarrier); the executable P2/P3 carrier will
- * consume this structure directly later.
+ * layout, lane, or instruction choices.
  */
 struct VSimdRegion {
   int vf_index{-1};   // source SIMD_VF index
@@ -87,19 +85,14 @@ struct VSimdRegionLift {
 /*!
  * \brief Build a region for a proven, closed, rectangular nest.
  *
- * `memory_status` is the PR-A per-VF status (LEGAL is required). All other
+ * `memory_status` is the PR-A per-nest status (LEGAL is required). All other
  * cases return lifted=false with a diagnostic; this function never mutates IR.
- * PR-D enables arbitrary rectangular rank, broadcast (dep_axes), index/stride
- * and transpose maps.
+ * Arbitrary rectangular rank, broadcast (dep_axes), index/stride and transpose
+ * maps are supported.
  */
 TVM_DLL VSimdRegionLift
 BuildMinimalRegion(const VSimdCaptureInfo &info,
                    const std::string &memory_status);
-
-/*! \brief Backward-compatible PR-C entry: require exactly one parallel axis. */
-TVM_DLL VSimdRegionLift
-BuildMinimal1DRegion(const VSimdCaptureInfo &info,
-                     const std::string &memory_status);
 
 /*! \brief Reconstruct scalar serial loops from a region (reference expander). */
 TVM_DLL tirx::Stmt ExpandVSimdRegionToLoops(const VSimdRegion &region);
@@ -118,13 +111,10 @@ struct VSimdRegionVerify {
 TVM_DLL VSimdRegionVerify VerifyExpandedRegion(const VSimdRegion &region,
                                                const tirx::Stmt &expanded);
 
-/*! \brief Debug-only TIR carrier marker containing the region dump. */
-TVM_DLL tirx::Stmt BuildVSimdRegionCarrier(const VSimdRegion &region);
-
 /*! \brief Human-readable region dump. */
 TVM_DLL std::string DumpVSimdRegion(const VSimdRegion &region);
 
-/*! \brief Lift every eligible nest and render the region/expanded/carrier dump. */
+/*! \brief Lift every eligible nest and render the region/expanded dump. */
 TVM_DLL ffi::String AnalyzeVSimdRegionReport(const tirx::PrimFunc &func);
 
 } // namespace tl

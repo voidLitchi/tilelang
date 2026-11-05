@@ -48,29 +48,13 @@ def AscendAnalyzeSimdVFCaptureInfo(func):
 
 
 def AscendAnalyzeVSimdRegionReport(func):
-    """Return the PR-C minimal 1-D region lift/dump for a PrimFunc."""
+    """Return the per-nest region lift/dump report for a PrimFunc."""
     return _ffi_api.AscendAnalyzeVSimdRegionReport(func)  # type: ignore
 
 
 def AscendAnalyzeVSimdRegion():
-    """Debug pass: print the PR-C minimal 1-D region lift (read-only)."""
+    """Debug pass: print the region lift report (read-only)."""
     return _ffi_api.AscendAnalyzeVSimdRegion()  # type: ignore
-
-
-def AscendAnalyzeVSimdFragmentReport(func):
-    """Return the per-VF fragment whitelist/table report for a PrimFunc.
-
-    The report lists the op whitelist status of every ``SIMD_VF`` and the
-    fragment table (defs/uses, cross-VF use, tileop def/use). It does not
-    modify the IR: ``local.fragment`` is register-level storage, and P2/P3 own
-    the physical realization (register/spill/reject).
-    """
-    return _ffi_api.AscendAnalyzeVSimdFragmentReport(func)  # type: ignore
-
-
-def AscendAnalyzeVSimdFragment():
-    """Read-only debug pass: log the P1 fragment whitelist/table report."""
-    return _ffi_api.AscendAnalyzeVSimdFragment()  # type: ignore
 
 
 def AscendLiftVSimd():
@@ -304,8 +288,6 @@ __all__ = [
     "AscendAnalyzeSimdVFCapture",
     "AscendAnalyzeSimdVFCaptureReport",
     "AscendAnalyzeSimdVFCaptureInfo",
-    "AscendAnalyzeVSimdFragment",
-    "AscendAnalyzeVSimdFragmentReport",
     "AscendAnalyzeVSimdRegion",
     "AscendLiftVSimd",
     "AscendAnalyzeVSimdRegionReport",

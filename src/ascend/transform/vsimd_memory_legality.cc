@@ -1145,7 +1145,6 @@ private:
 class VFVisitor : public StmtExprVisitor {
 public:
   std::ostringstream out;
-  std::vector<std::string> statuses;
   std::vector<VSimdMemoryRegionStatus> region_statuses;
 
   void Run(const PrimFunc &func) {
@@ -1165,7 +1164,7 @@ public:
                           vf_assumes.assumptions.end());
       LegalityAnalyzer analyzer(*facts_, &out, assumptions_, bindings_,
                                 thread_bounds_);
-      statuses.push_back(analyzer.AnalyzeVF(ffi::GetRef<SBlock>(op), vf));
+      analyzer.AnalyzeVF(ffi::GetRef<SBlock>(op), vf);
       for (size_t i = 0; i < analyzer.nest_statuses.size(); ++i) {
         region_statuses.push_back(VSimdMemoryRegionStatus{
             vf, static_cast<int>(i), analyzer.nest_statuses[i]});
@@ -1232,13 +1231,6 @@ String AnalyzeVSimdMemoryLegality(const PrimFunc &func) {
   if (report.empty())
     report = "no SIMD_VF blocks\n";
   return String(report);
-}
-
-std::vector<std::string>
-AnalyzeVSimdMemoryStatuses(const PrimFunc &func) {
-  VFVisitor visitor;
-  visitor.Run(func);
-  return visitor.statuses;
 }
 
 std::vector<VSimdMemoryRegionStatus>

@@ -140,7 +140,7 @@ def test_fa_copy_reduce_fragment_program():
     assert any(capture["storage"] == "FRAGMENT" for p in programs for capture in p["captures"])
     assert any(p["fragments"] for p in programs)
     fragment_names = {f["name"] for p in programs for f in p["fragments"]}
-    assert "P_frag_frag" in fragment_names
+    assert "P_frag" in fragment_names
     for program in programs:
         if int(program["vf_index"]) in (0, 1, 3, 4):
             assert not program["fragments"]

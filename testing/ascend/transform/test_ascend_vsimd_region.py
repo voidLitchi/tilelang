@@ -33,7 +33,6 @@ def test_simple_region_lifted():
     assert "expanded:" in report
     assert "for i in range(64)" in report
     assert "verify: OK" in report
-    assert "tl.vsimd.region" in report
 
 
 def test_2d_lifted():
