@@ -43,6 +43,26 @@ inline constexpr const char *kLifted = "LIFTED";
 inline constexpr const char *kOpaque = "OPAQUE";
 } // namespace region_status
 
+/*!
+ * \brief Why a region is OPAQUE.
+ *
+ * A LIFTED region carries no reason code. The vocabulary is closed so a
+ * consumer can switch on it; new categories must be added here.
+ *
+ * There is deliberately no MANUAL code: hand-written ``tl.simd.*`` VFs are
+ * rejected at VF granularity, so P1 has no per-region manual verdict. Those
+ * regions report UNSUPPORTED and keep the VF-level message in ``reason``;
+ * a MANUAL code can return once manual detection is per region.
+ */
+namespace reason_code {
+inline constexpr const char *kIllegal = "ILLEGAL";
+inline constexpr const char *kUnproven = "UNPROVEN";
+inline constexpr const char *kUnsupported = "UNSUPPORTED";
+inline constexpr const char *kInternal = "INTERNAL";
+/*! \brief Dropped because a fragment-connected region in its group is OPAQUE. */
+inline constexpr const char *kGroupOpaque = "GROUP_OPAQUE";
+} // namespace reason_code
+
 /*! \brief One T.Parallel loop level: induction variable and its range. */
 class VSimdAxisNode : public ffi::Object {
 public:
@@ -197,11 +217,17 @@ TVM_DLL VSimdOp AsOp(const ffi::ObjectRef &ref);
 /*! \brief Nested ops of a ``parallel`` op, typed. */
 TVM_DLL ffi::Array<VSimdOp> ChildOps(const VSimdOp &op);
 
-/*! \brief One captured buffer: capture kind plus storage class and layout. */
+/*!
+ * \brief One captured buffer: capture kind plus storage class and layout.
+ *
+ * ``kind`` is ``param``/``alloc``/``view``/``local`` for analysed captures and
+ * ``unknown`` for buffers that were only observed syntactically in an OPAQUE
+ * region (the pass does not guess their role).
+ */
 class VSimdCaptureNode : public ffi::Object {
 public:
   tirx::Buffer buffer;
-  ffi::String kind;    // param / alloc / view / local
+  ffi::String kind;    // param / alloc / view / local / unknown
   ffi::String storage; // GLOBAL / SHARED / FRAGMENT / UNKNOWN
   ffi::Optional<Layout> layout;
 

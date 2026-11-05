@@ -66,6 +66,12 @@ struct AccessInfo {
 
 /*! \brief A single top-level T.Parallel nest collected from a SIMD_VF. */
 struct ParallelNest {
+  /*! \brief Outermost Parallel loop of the nest.
+   *
+   * Identity of the analysis unit: the P1 pass attaches the region to this
+   * node, so consumers match nests by pointer instead of by ordinal.
+   */
+  const ForNode *root{nullptr};
   std::vector<LoopInfo> loops;      // parallel domain, outer to inner
   std::vector<AccessInfo> accesses; // loads/stores in the nest
   std::vector<Buffer> local_views;  // DeclBuffer/AllocBuffer in the VF body
@@ -160,6 +166,7 @@ public:
     if (op->kind == ForKind::kParallel) {
       bool outer = depth_ == 0;
       if (outer) {
+        root_ = op;
         loops_.clear();
         accesses_.clear();
         local_views_.clear();
@@ -170,10 +177,12 @@ public:
       --depth_;
       if (outer) {
         ParallelNest nest;
+        nest.root = root_;
         nest.loops = loops_;
         nest.accesses = accesses_;
         nest.local_views = local_views_;
         nests.push_back(std::move(nest));
+        root_ = nullptr;
         loops_.clear();
         accesses_.clear();
         local_views_.clear();
@@ -282,6 +291,7 @@ public:
 private:
   int depth_{0};
   bool allow_control_flow_{false};
+  const ForNode *root_{nullptr};
   std::vector<LoopInfo> loops_;
   std::vector<AccessInfo> accesses_;
   std::vector<Buffer> local_views_;

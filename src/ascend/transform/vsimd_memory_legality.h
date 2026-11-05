@@ -30,6 +30,8 @@ struct VSimdMemoryRegionStatus {
   int vf_index{-1};
   int nest_index{-1};
   std::string status;
+  /*! \brief Outermost Parallel loop of the nest; identity for matching. */
+  const tirx::ForNode *root{nullptr};
 };
 
 TVM_DLL std::vector<VSimdMemoryRegionStatus>

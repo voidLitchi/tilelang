@@ -534,6 +534,8 @@ static std::string SanitizeModel(const std::string &model) {
 class LegalityAnalyzer {
 public:
   std::vector<std::string> nest_statuses;
+  /*! \brief Outermost Parallel loop per nest, parallel to `nest_statuses`. */
+  std::vector<const ForNode *> nest_roots;
   LegalityAnalyzer(const FunctionCollector &facts, std::ostringstream *out,
                    const std::vector<PrimExpr> &assumptions,
                    const std::vector<std::pair<Var, PrimExpr>> &bindings,
@@ -616,6 +618,7 @@ public:
       }
       AnalyzeNest_(&nest);
       nest_statuses.push_back(StatusName(nest.status));
+      nest_roots.push_back(parallel_nest.root);
       overall = std::max(overall, nest.status);
       body << "  nest " << nest_index++ << ": domain=";
       for (const LoopInfo &loop : nest.loops) {
@@ -1167,7 +1170,8 @@ public:
       analyzer.AnalyzeVF(ffi::GetRef<SBlock>(op), vf);
       for (size_t i = 0; i < analyzer.nest_statuses.size(); ++i) {
         region_statuses.push_back(VSimdMemoryRegionStatus{
-            vf, static_cast<int>(i), analyzer.nest_statuses[i]});
+            vf, static_cast<int>(i), analyzer.nest_statuses[i],
+            analyzer.nest_roots[i]});
       }
       assumptions_.resize(saved_assumptions);
       return;

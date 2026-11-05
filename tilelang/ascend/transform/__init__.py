@@ -58,7 +58,7 @@ def AscendAnalyzeVSimdRegion():
 
 
 def AscendLiftVSimd():
-    """P1 metadata pass: attach per-VF VSimdProgram annotations."""
+    """P1 pass: attach a ``tl.vsimd.region`` annotation to top-level Parallels."""
     return _ffi_api.AscendLiftVSimd()  # type: ignore
 
 

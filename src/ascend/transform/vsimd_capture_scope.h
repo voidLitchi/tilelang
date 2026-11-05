@@ -41,6 +41,11 @@ struct VSimdCaptureInfo {
   std::string status;    // this nest's status: CLOSED / OPEN / OPAQUE
   std::string message;   // reason for OPAQUE / no nest; empty when analyzed
 
+  // Outermost Parallel loop of this nest. Consumers that need to attach
+  // something to the nest match on this pointer instead of the ordinal, which
+  // keeps the mapping structural (no parallel-ordinal bookkeeping).
+  const tirx::ForNode *root_for{nullptr};
+
   // Definition domain of the parallel nest. Required to build index maps and
   // to reproduce the loop in the reference expander / region carrier.
   std::vector<vsimd::LoopInfo> domain;

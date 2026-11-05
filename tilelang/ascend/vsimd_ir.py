@@ -81,7 +81,13 @@ def region(
     reason="",
     group=-1,
 ):
-    """Build a region from ``axes`` + ``ops`` with the usual empty context."""
+    """Build a region from ``axes`` + ``ops`` with the usual empty context.
+
+    An OPAQUE region defaults to ``reason_code="UNSUPPORTED"`` because the
+    verifier requires a known reason code for every non-lifted region.
+    """
+    if status == "OPAQUE" and not reason_code:
+        reason_code = "UNSUPPORTED"
     return _make_region(
         vf_index,
         region_index,

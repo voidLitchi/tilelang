@@ -301,6 +301,12 @@ def test_empty_region_is_rejected():
     i = tirx.Var("i", "int32")
     region = ir.region([ir.make_axis(i, 0, 64)], [])
     assert "region has no op" in ir.verify_region(region)
+    # Every region carries at least the op that stands for its body; the P1
+    # pass always emits one, including for OPAQUE regions.
+    opaque = ir.region(
+        [ir.make_axis(i, 0, 64)], [], status="OPAQUE", reason="nothing modelled"
+    )
+    assert "region has no op" in ir.verify_region(opaque)
 
 
 def test_opaque_region_without_reason_is_rejected():

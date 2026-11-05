@@ -171,6 +171,12 @@ bool KindIsKnown(const String &kind) {
          kind == op_kind::kFill || kind == op_kind::kOpaque;
 }
 
+bool IsKnownReasonCode(const String &code) {
+  return code == reason_code::kIllegal || code == reason_code::kUnproven ||
+         code == reason_code::kUnsupported || code == reason_code::kInternal ||
+         code == reason_code::kGroupOpaque;
+}
+
 bool CheckBufRegion(const Optional<VSimdBufRegion> &region,
                     const char *what, std::string *error) {
   if (!region.has_value() || !region.value().defined())
@@ -313,9 +319,20 @@ bool VerifyOp(const VSimdOp &op, int ctx_axes, std::string *error,
     used_buffers->insert(node->dst.value()->buffer->data.get());
     return true;
   }
-  // opaque: its effect is not modelled, so it must explain itself.
+  // opaque: its effect is not modelled, so it must explain itself and record a
+  // conservative footprint whose buffers are captured like any other op's.
   if (node->reason.empty())
     return Fail(error, "opaque op has no reason");
+  for (const Buffer &buffer : node->reads) {
+    if (!buffer.defined())
+      return Fail(error, "opaque op reads an undefined buffer");
+    used_buffers->insert(buffer->data.get());
+  }
+  for (const Buffer &buffer : node->writes) {
+    if (!buffer.defined())
+      return Fail(error, "opaque op writes an undefined buffer");
+    used_buffers->insert(buffer->data.get());
+  }
   return true;
 }
 
@@ -345,13 +362,26 @@ bool VerifyRegion(const VSimdRegion &region, std::string *error) {
     return Fail(error, "region has a negative region_index");
   if (node->axes.empty())
     return Fail(error, "region has no Parallel axis");
+  // Every region carries at least one op: a lifted region has its body, and an
+  // opaque region carries the op that stands for what it could not model (the
+  // P1 pass always emits one, including the syntactic-footprint fallback).
   if (node->ops.empty())
     return Fail(error, "region has no op");
   if (node->status != String(region_status::kLifted) &&
       node->status != String(region_status::kOpaque))
     return Fail(error, "region has an unknown status");
-  if (node->status == String(region_status::kOpaque) && node->reason.empty())
-    return Fail(error, "OPAQUE region has no reason");
+  if (node->status == String(region_status::kLifted)) {
+    // A lifted region is liftable by itself: it cannot carry a reason.
+    if (!node->reason_code.empty())
+      return Fail(error, "LIFTED region must not carry a reason code");
+    if (!node->reason.empty())
+      return Fail(error, "LIFTED region must not carry a reason");
+  } else {
+    if (node->reason.empty())
+      return Fail(error, "OPAQUE region has no reason");
+    if (!IsKnownReasonCode(node->reason_code))
+      return Fail(error, "OPAQUE region has an unknown reason code");
+  }
   if (node->group < -1)
     return Fail(error, "region has an invalid group");
 

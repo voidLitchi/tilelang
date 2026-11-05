@@ -379,6 +379,7 @@ private:
     VSimdCaptureInfo info;
     info.vf_index = vf_index_;
     info.nest_index = nest_index;
+    info.root_for = nest.root;
     info.domain = nest.loops;
     info.accesses = nest.accesses;
 
