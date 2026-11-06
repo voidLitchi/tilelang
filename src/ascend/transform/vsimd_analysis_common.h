@@ -157,9 +157,16 @@ public:
       StmtExprVisitor::VisitStmt(stmt);
       return;
     }
+    MarkUnsupported("unsupported statement inside T.Parallel: " +
+                    stmt->GetTypeKey());
+  }
+
+  /*! \brief Record the first reason the VF cannot be modelled. */
+  void MarkUnsupported(const std::string &reason) {
+    if (unsupported)
+      return;
     unsupported = true;
-    unsupported_reason =
-        "unsupported statement inside T.Parallel: " + stmt->GetTypeKey();
+    unsupported_reason = reason;
   }
 
   void VisitStmt_(const ForNode *op) final {
@@ -167,12 +174,25 @@ public:
       bool outer = depth_ == 0;
       if (outer) {
         root_ = op;
+        chain_open_ = true;
         loops_.clear();
         accesses_.clear();
         local_views_.clear();
+      } else if (!chain_open_) {
+        // A Parallel loop that is not the sole body of its parent is a sibling,
+        // not a deeper level of the same rectangular nest: the merged iteration
+        // space would mix statements that the source runs sequentially.
+        MarkUnsupported(
+            "T.Parallel body is not a single rectangular nest (sibling "
+            "parallel/serial/if statement); P1 models one rectangular nest "
+            "per region");
+        return;
       }
       loops_.push_back(LoopInfo{op->loop_var, op->min, op->extent});
       ++depth_;
+      // Only a body that is exactly one Parallel loop continues the chain.
+      if (!IsSingleParallelLoop(op->body))
+        chain_open_ = false;
       StmtExprVisitor::VisitStmt_(op);
       --depth_;
       if (outer) {
@@ -183,40 +203,34 @@ public:
         nest.local_views = local_views_;
         nests.push_back(std::move(nest));
         root_ = nullptr;
+        chain_open_ = false;
         loops_.clear();
         accesses_.clear();
         local_views_.clear();
       }
     } else {
-      if (depth_ > 0 && !unsupported) {
-        unsupported = true;
-        unsupported_reason = "serial loop inside T.Parallel";
-      }
+      if (depth_ > 0)
+        MarkUnsupported("serial loop inside T.Parallel");
       StmtExprVisitor::VisitStmt_(op);
     }
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
-    if (depth_ > 0 && !unsupported) {
-      unsupported = true;
-      unsupported_reason = "if inside T.Parallel";
-    }
+    if (depth_ > 0)
+      MarkUnsupported("if inside T.Parallel");
     StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const WhileNode *op) final {
-    if (depth_ > 0 && !unsupported) {
-      unsupported = true;
-      unsupported_reason = "while inside T.Parallel";
-    }
+    if (depth_ > 0)
+      MarkUnsupported("while inside T.Parallel");
     StmtExprVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
     if (depth_ > 0) {
       if (op->buffer.scope() == "local.var") {
-        unsupported = true;
-        unsupported_reason = "local.var access inside T.Parallel";
+        MarkUnsupported("local.var access inside T.Parallel");
         return;
       }
       AccessInfo info;
@@ -232,8 +246,7 @@ public:
   void VisitExpr_(const BufferLoadNode *op) final {
     if (depth_ > 0) {
       if (op->buffer.scope() == "local.var") {
-        unsupported = true;
-        unsupported_reason = "local.var access inside T.Parallel";
+        MarkUnsupported("local.var access inside T.Parallel");
         return;
       }
       AccessInfo info;
@@ -260,8 +273,7 @@ public:
     // only models values and BufferStores, so lifting it would silently drop
     // the effect. Reject it here instead of letting it pass A/B/C.
     if (depth_ > 0) {
-      unsupported = true;
-      unsupported_reason = "opaque Evaluate inside T.Parallel";
+      MarkUnsupported("opaque Evaluate inside T.Parallel");
       return;
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -274,13 +286,11 @@ public:
         std::string name = callee->name;
         if (name.rfind("tl.tileop.", 0) == 0 ||
             name.rfind("tl.ascend_", 0) == 0) {
-          unsupported = true;
-          unsupported_reason = "TileOp/copy inside T.Parallel";
+          MarkUnsupported("TileOp/copy inside T.Parallel");
           return;
         }
         if (name == "tirx.call_extern" || name == "tirx.call_pure_extern") {
-          unsupported = true;
-          unsupported_reason = "opaque call_extern inside T.Parallel";
+          MarkUnsupported("opaque call_extern inside T.Parallel");
           return;
         }
       }
@@ -289,8 +299,22 @@ public:
   }
 
 private:
+  /*! \brief True while the current nest may still be deepened by one loop. */
+  static bool IsSingleParallelLoop(const Stmt &body) {
+    if (const auto *loop = body.as<ForNode>())
+      return loop->kind == ForKind::kParallel;
+    if (const auto *seq = body.as<SeqStmtNode>()) {
+      if (seq->seq.size() == 1) {
+        if (const auto *only = seq->seq[0].as<ForNode>())
+          return only->kind == ForKind::kParallel;
+      }
+    }
+    return false;
+  }
+
   int depth_{0};
   bool allow_control_flow_{false};
+  bool chain_open_{false};
   const ForNode *root_{nullptr};
   std::vector<LoopInfo> loops_;
   std::vector<AccessInfo> accesses_;

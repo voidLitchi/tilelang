@@ -74,7 +74,14 @@ class PassConfigKey(str, Enum):
     """Disable warp specialization optimization. Default: False"""
 
     TL_ASCEND_SIMD_LIFT = "tl.ascend_simd_lift"
-    """Enable the P1 VSimdProgram metadata pass on Ascend. Default: True."""
+    """Enable the P1 VSimd region metadata pass on Ascend. Default: True."""
+
+    TL_ASCEND_SIMD_REGION_VERIFY = "tl.ascend_simd_region_verify"
+    """Verify each lifted VSimd region against the original Parallel body.
+
+    This is the P1 structural oracle (reconstruct + compare). Default: True;
+    disabling it only skips a debug check and never changes what P1 emits.
+    """
 
     TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
     """Enable Ascend auto scheduling. Default: True."""

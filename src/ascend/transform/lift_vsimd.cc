@@ -286,8 +286,8 @@ static const char *ReasonCodeFor(const std::string &memory_status,
 /*! \brief Walk a VF body, annotating every top-level T.Parallel loop. */
 class RegionBuilder {
 public:
-  RegionBuilder(const ModuleFacts &facts, VfState *state)
-      : facts_(facts), state_(state) {}
+  RegionBuilder(const ModuleFacts &facts, VfState *state, bool verify_body)
+      : facts_(facts), state_(state), verify_body_(verify_body) {}
 
   Stmt Build(const Stmt &stmt) {
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
@@ -341,7 +341,7 @@ private:
     } else {
       const std::string memory =
           memory_status == nullptr ? "MISSING" : memory_status->status;
-      VSimdRegionLift lift = BuildRegion(*info, memory);
+      VSimdRegionLift lift = BuildRegion(*info, memory, verify_body_);
       if (lift.lifted) {
         region = lift.region;
         region->vf_index = state_->index;
@@ -361,11 +361,13 @@ private:
 
   const ModuleFacts &facts_;
   VfState *state_;
+  bool verify_body_{true};
 };
 
 class LiftMutator : public StmtExprMutator {
 public:
-  explicit LiftMutator(ModuleFacts facts) : facts_(std::move(facts)) {}
+  LiftMutator(ModuleFacts facts, bool verify_body)
+      : facts_(std::move(facts)), verify_body_(verify_body) {}
 
   Stmt VisitStmt_(const SBlockNode *op) final {
     if (op->name_hint != "SIMD_VF")
@@ -374,7 +376,7 @@ public:
     SBlock block = ffi::GetRef<SBlock>(op);
     VfState state;
     state.index = vf_index;
-    RegionBuilder builder(facts_, &state);
+    RegionBuilder builder(facts_, &state, verify_body_);
     Stmt body = builder.Build(block->body);
     // Fragment facts and fragment-only grouping are owned by the fragment
     // module: this is the only place the pass depends on it.
@@ -389,6 +391,7 @@ public:
 
 private:
   ModuleFacts facts_;
+  bool verify_body_{true};
   int vf_index_{0};
 };
 
@@ -424,7 +427,9 @@ tvm::transform::Pass AscendLiftVSimd() {
     facts.memory_regions = AnalyzeVSimdMemoryRegions(f);
     facts.fragments = CollectFragmentFacts(f);
 
-    LiftMutator mutator(std::move(facts));
+    const bool verify_body =
+        ctx->GetConfig<Bool>("tl.ascend_simd_region_verify", Bool(true)).value();
+    LiftMutator mutator(std::move(facts), verify_body);
     PrimFuncNode *write_ptr = f.CopyOnWrite();
     write_ptr->body = mutator(std::move(write_ptr->body));
     return f;

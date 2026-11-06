@@ -34,6 +34,20 @@ struct VSimdMemoryRegionStatus {
   const tirx::ForNode *root{nullptr};
 };
 
+/*! \brief One analysis run: the rendered report plus the per-nest statuses. */
+struct VSimdMemoryAnalysis {
+  std::string report;
+  std::vector<VSimdMemoryRegionStatus> regions;
+};
+
+/*!
+ * \brief Run the legality analysis once and return both outputs.
+ *
+ * The report renderer and the per-nest status list come from the same visitor,
+ * so a debug dump does not need to analyze the function twice.
+ */
+TVM_DLL VSimdMemoryAnalysis AnalyzeVSimdMemory(const tirx::PrimFunc &func);
+
 TVM_DLL std::vector<VSimdMemoryRegionStatus>
 AnalyzeVSimdMemoryRegions(const tirx::PrimFunc &func);
 

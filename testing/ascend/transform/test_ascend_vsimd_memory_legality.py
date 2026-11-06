@@ -503,7 +503,7 @@ def test_debug_pass_is_read_only():
             T.copy(c_ub, C)
 
     mod = tvm.IRModule({"main": main})
-    out = at.AscendAnalyzeSimdVFMemory()(mod)
+    out = at.AscendDumpVSimd()(mod)
     assert tvm.ir.structural_equal(out["main"], main)
 
 

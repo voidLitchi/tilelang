@@ -269,16 +269,45 @@ def test_region_annotation_survives_simplify():
 
 
 def test_opaque_reason_from_unsupported_parallel():
-    """A row-slice reduction nested in the row loop is not modelled yet.
+    """A row-slice reduction directly in the row loop is not modelled yet."""
 
-    This is the target-FA shape: one outer row ``T.Parallel`` whose body mixes
-    nested Parallel loops with row ``T.reduce`` calls. The current nest model
-    cannot represent it, so the region must be OPAQUE with the reason.
-    """
     br, bc = 64, 128
 
     @T.prim_func
     def main(A: T.Tensor((br, bc), "float32"), M: T.Tensor((br,), "float32")):
+        with T.Kernel(1):
+            s_ub = T.alloc_shared((br, bc), "float32")
+            m_ub = T.alloc_shared((br,), "float32")
+            T.copy(A, s_ub)
+            with T.SimdVF():
+                for i in T.Parallel(br):
+                    T.reduce_max(
+                        s_ub[i, 0:bc], m_ub[i : i + 1], dim=1, clear=False
+                    )
+            T.copy(m_ub, M)
+
+    regions = _regions(_lift(main))
+    assert len(regions) == 1
+    region = regions[0]
+    assert region.status == "OPAQUE"
+    assert region.reason_code == "UNSUPPORTED"
+    assert "opaque Evaluate" in region.reason
+
+
+def test_sibling_parallels_are_unsupported_not_internal():
+    """A Parallel body that is a sequence of loops is not one rectangular nest.
+
+    The nest model collapses only a body that is exactly one Parallel loop; a
+    body that mixes sibling loops with other statements must be reported as
+    unsupported input, not as a P1 internal error. This pins the target-FA shape
+    and the unit-extent variant that used to reach the reconstruction oracle.
+    """
+    br, bc = 64, 128
+
+    @T.prim_func
+    def fa_shape(
+        A: T.Tensor((br, bc), "float32"), M: T.Tensor((br,), "float32")
+    ):
         with T.Kernel(1):
             s_ub = T.alloc_shared((br, bc), "float32")
             m_ub = T.alloc_shared((br,), "float32")
@@ -292,12 +321,27 @@ def test_opaque_reason_from_unsupported_parallel():
                     )
             T.copy(m_ub, M)
 
-    regions = _regions(_lift(main))
-    assert len(regions) == 1
-    region = regions[0]
-    assert region.status == "OPAQUE"
-    assert region.reason_code == "UNSUPPORTED"
-    assert "opaque Evaluate" in region.reason
+    @T.prim_func
+    def unit_siblings(A: T.Tensor((4,), "float32"), C: T.Tensor((4,), "float32")):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((4,), "float32")
+            c_ub = T.alloc_shared((4,), "float32")
+            T.copy(A, a_ub)
+            with T.SimdVF():
+                for i in T.Parallel(4):
+                    for j in T.Parallel(1):
+                        a_ub[i] = a_ub[i] * 2.0
+                    for k in T.Parallel(1):
+                        c_ub[i] = a_ub[i] + 1.0
+            T.copy(c_ub, C)
+
+    for func in (fa_shape, unit_siblings):
+        regions = _regions(_lift(func))
+        assert len(regions) == 1
+        region = regions[0]
+        assert region.status == "OPAQUE"
+        assert region.reason_code == "UNSUPPORTED"
+        assert "not a single rectangular nest" in region.reason
 
 
 def test_fragment_table_is_a_vf_annotation():

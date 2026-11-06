@@ -6,14 +6,18 @@ from tilelang.transform import _ffi_api
 from . import z3_scheduler  # noqa: F401
 
 
-def AscendAnalyzeSimdVFMemory():
-    """Analyze memory legality of every SIMD_VF block (read-only debug pass).
+def AscendDumpVSimd():
+    """Debug pass: log the full P1 report (memory, capture/scope, region lift).
 
-    The pass returns the IR unchanged and logs a report of store injectivity
-    and cross-iteration dependences. Use it to inspect the P1 position without
-    changing the pipeline.
+    The pass returns the IR unchanged, so it can be dropped into any pipeline
+    position for investigation.
     """
-    return _ffi_api.AscendAnalyzeSimdVFMemory()  # type: ignore
+    return _ffi_api.AscendDumpVSimd()  # type: ignore
+
+
+def AscendDumpVSimdReport(func):
+    """Return the combined P1 report for a PrimFunc (read-only)."""
+    return _ffi_api.AscendDumpVSimdReport(func)  # type: ignore
 
 
 def AscendAnalyzeSimdVFMemoryReport(func):
@@ -32,11 +36,6 @@ def AscendAnalyzeSimdVFMemoryReport(func):
     return _ffi_api.AscendAnalyzeSimdVFMemoryReport(func)  # type: ignore
 
 
-def AscendAnalyzeSimdVFCapture():
-    """Analyze capture sets and scope closure of SIMD_VF blocks (read-only)."""
-    return _ffi_api.AscendAnalyzeSimdVFCapture()  # type: ignore
-
-
 def AscendAnalyzeSimdVFCaptureReport(func):
     """Return a capture/scope report for a PrimFunc containing SIMD_VF blocks."""
     return _ffi_api.AscendAnalyzeSimdVFCaptureReport(func)  # type: ignore
@@ -50,11 +49,6 @@ def AscendAnalyzeSimdVFCaptureInfo(func):
 def AscendAnalyzeVSimdRegionReport(func):
     """Return the per-nest region lift/dump report for a PrimFunc."""
     return _ffi_api.AscendAnalyzeVSimdRegionReport(func)  # type: ignore
-
-
-def AscendAnalyzeVSimdRegion():
-    """Debug pass: print the region lift report (read-only)."""
-    return _ffi_api.AscendAnalyzeVSimdRegion()  # type: ignore
 
 
 def AscendLiftVSimd():
@@ -283,14 +277,13 @@ __all__ = [
     "AnnotateMultiBufferEligible",
     "AscendRemoveNoOp",
     "AscendInsertOOBPadding",
-    "AscendAnalyzeSimdVFMemory",
+    "AscendDumpVSimd",
+    "AscendDumpVSimdReport",
     "AscendAnalyzeSimdVFMemoryReport",
-    "AscendAnalyzeSimdVFCapture",
     "AscendAnalyzeSimdVFCaptureReport",
     "AscendAnalyzeSimdVFCaptureInfo",
-    "AscendAnalyzeVSimdRegion",
-    "AscendLiftVSimd",
     "AscendAnalyzeVSimdRegionReport",
+    "AscendLiftVSimd",
     "AscendSimdVFLowerParallel",
     "AscendThreadSync",
     "AscendLayoutInference",

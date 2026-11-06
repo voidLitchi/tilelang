@@ -1228,20 +1228,24 @@ private:
 
 } // namespace
 
-String AnalyzeVSimdMemoryLegality(const PrimFunc &func) {
+VSimdMemoryAnalysis AnalyzeVSimdMemory(const PrimFunc &func) {
   VFVisitor visitor;
   visitor.Run(func);
-  std::string report = visitor.out.str();
-  if (report.empty())
-    report = "no SIMD_VF blocks\n";
-  return String(report);
+  VSimdMemoryAnalysis analysis;
+  analysis.report = visitor.out.str();
+  if (analysis.report.empty())
+    analysis.report = "no SIMD_VF blocks\n";
+  analysis.regions = std::move(visitor.region_statuses);
+  return analysis;
+}
+
+String AnalyzeVSimdMemoryLegality(const PrimFunc &func) {
+  return String(AnalyzeVSimdMemory(func).report);
 }
 
 std::vector<VSimdMemoryRegionStatus>
 AnalyzeVSimdMemoryRegions(const PrimFunc &func) {
-  VFVisitor visitor;
-  visitor.Run(func);
-  return visitor.region_statuses;
+  return AnalyzeVSimdMemory(func).regions;
 }
 
 } // namespace tl

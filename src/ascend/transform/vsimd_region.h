@@ -15,6 +15,7 @@
 
 #include "vsimd_capture_scope.h"
 #include "vsimd_ir.h"
+#include "vsimd_memory_legality.h"
 
 namespace tvm {
 namespace tl {
@@ -34,9 +35,16 @@ struct VSimdRegionLift {
  * All other cases return lifted=false with a diagnostic; this function never
  * mutates IR. The built region carries the collapsed Parallel axes, the
  * ordered store ops of the innermost body, and the captured context.
+ *
+ * With `verify_body` the builder also reconstructs the region and compares it
+ * against the original Parallel subtree (see CompareRegionWithOriginal). That is
+ * the structural oracle: a mismatch means the region does not faithfully
+ * describe the source, i.e. a compiler bug, and is reported as an internal
+ * error rather than a user fallback.
  */
 TVM_DLL VSimdRegionLift BuildRegion(const VSimdCaptureInfo &info,
-                                    const std::string &memory_status);
+                                    const std::string &memory_status,
+                                    bool verify_body = true);
 
 /*!
  * \brief Reconstruct serial scalar / structured IR from a region.
@@ -68,6 +76,41 @@ struct VSimdRegionVerify {
 TVM_DLL VSimdRegionVerify
 VerifyExpandedRegion(const vsimd::VSimdRegion &region,
                      const tirx::Stmt &expanded);
+
+/*!
+ * \brief Compare a region's reconstruction against the original Parallel loop.
+ *
+ * Both sides are normalized first: Parallel becomes Serial, For annotations are
+ * dropped, nested SeqStmt are flattened, and DeclBuffer statements are compared
+ * as a set (the reconstruction hoists them out of the loops). The comparison is
+ * structural, not numerical: it proves that the region describes the same
+ * loops, stores, values and tileop calls in the same order, so P3 cannot lose
+ * or reorder anything. TIR spans are not compared.
+ *
+ * The result carries a path such as `body[1].value` on mismatch.
+ */
+struct VSimdRegionMatch {
+  bool ok{true};
+  std::string reason;
+};
+
+TVM_DLL VSimdRegionMatch
+CompareRegionWithOriginal(const vsimd::VSimdRegion &region,
+                          const tirx::Stmt &original);
+
+/*! \brief Whether the structural oracle is enabled by the pass config. */
+TVM_DLL bool RegionVerifyEnabled();
+
+/*!
+ * \brief Render the per-nest region report from precomputed analyses.
+ *
+ * Split out so a debug dump can share one capture/memory analysis instead of
+ * re-running them per section.
+ */
+TVM_DLL ffi::String
+RenderVSimdRegionReport(const std::vector<VSimdCaptureInfo> &infos,
+                        const std::vector<VSimdMemoryRegionStatus> &memory,
+                        bool verify_body = true);
 
 /*! \brief Lift every eligible nest and render the region/expanded dump. */
 TVM_DLL ffi::String AnalyzeVSimdRegionReport(const tirx::PrimFunc &func);

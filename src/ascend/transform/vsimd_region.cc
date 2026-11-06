@@ -25,7 +25,9 @@ namespace tl {
 
 using namespace tirx;
 using namespace vsimd;
+using ffi::Any;
 using ffi::Array;
+using ffi::Map;
 using ffi::Optional;
 using ffi::String;
 
@@ -222,10 +224,208 @@ int CountWrites(const Array<VSimdOp> &ops) {
   return writes;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Reconstruction oracle                                                     */
+/* ------------------------------------------------------------------------- */
+
+Stmt NormalizeStmt(const Stmt &stmt, std::vector<Buffer> *decls);
+
+/*! \brief Normalize a statement sequence: flatten, drop DeclBuffer, keep order. */
+std::vector<Stmt> NormalizeSeq(const Stmt &stmt, std::vector<Buffer> *decls) {
+  std::vector<Stmt> out;
+  if (!stmt.defined())
+    return out;
+  if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    for (const Stmt &child : seq->seq) {
+      std::vector<Stmt> normalized = NormalizeSeq(child, decls);
+      out.insert(out.end(), normalized.begin(), normalized.end());
+    }
+    return out;
+  }
+  if (const auto *decl = stmt.as<DeclBufferNode>()) {
+    decls->push_back(decl->buffer);
+    return out;
+  }
+  Stmt normalized = NormalizeStmt(stmt, decls);
+  if (normalized.defined())
+    out.push_back(normalized);
+  return out;
+}
+
+Stmt SeqOrMarker(const std::vector<Stmt> &stmts) {
+  if (stmts.empty())
+    return Evaluate(0); // an empty body still needs a comparable statement
+  if (stmts.size() == 1)
+    return stmts[0];
+  return SeqStmt(Array<Stmt>(stmts.begin(), stmts.end()));
+}
+
+/*!
+ * \brief Make both sides comparable.
+ *
+ * Parallel and Serial are the same control flow for the oracle, annotations are
+ * not part of the region's meaning, and T.view declarations are compared
+ * separately because the reconstruction hoists them out of the loops.
+ */
+Stmt NormalizeStmt(const Stmt &stmt, std::vector<Buffer> *decls) {
+  if (const auto *loop = stmt.as<ForNode>()) {
+    auto node = ffi::make_object<ForNode>(*loop);
+    node->kind = ForKind::kSerial;
+    node->annotations = Map<String, Any>();
+    node->body = SeqOrMarker(NormalizeSeq(loop->body, decls));
+    return ffi::GetRef<For>(node.get());
+  }
+  if (stmt.as<SeqStmtNode>())
+    return SeqOrMarker(NormalizeSeq(stmt, decls));
+  if (const auto *decl = stmt.as<DeclBufferNode>()) {
+    decls->push_back(decl->buffer);
+    return Stmt();
+  }
+  return stmt;
+}
+
+std::string DescribeStmt(const Stmt &stmt) {
+  return stmt.defined() ? stmt->GetTypeKey() : std::string("<none>");
+}
+
+bool CompareExpr(const PrimExpr &expected, const PrimExpr &actual,
+                 const std::string &path, std::string *reason) {
+  if (ffi::StructuralEqual()(expected, actual))
+    return true;
+  std::ostringstream os;
+  os << path << ": expression differs (expected `" << expected << "`, got `"
+     << actual << "`)";
+  *reason = os.str();
+  return false;
+}
+
+bool CompareStmts(const Stmt &expected, const Stmt &actual,
+                  const std::string &path, std::string *reason) {
+  if (const auto *expected_loop = expected.as<ForNode>()) {
+    const auto *actual_loop = actual.as<ForNode>();
+    if (actual_loop == nullptr) {
+      *reason = path + ": expected a loop, got " + DescribeStmt(actual);
+      return false;
+    }
+    if (!expected_loop->loop_var.same_as(actual_loop->loop_var)) {
+      *reason = path + ": loop variable differs";
+      return false;
+    }
+    if (!ffi::StructuralEqual()(expected_loop->min, actual_loop->min) ||
+        !ffi::StructuralEqual()(expected_loop->extent, actual_loop->extent)) {
+      std::ostringstream os;
+      os << path << ": loop range differs (expected [" << expected_loop->min
+         << ", " << expected_loop->min + expected_loop->extent << "), got ["
+         << actual_loop->min << ", " << actual_loop->min + actual_loop->extent
+         << "))";
+      *reason = os.str();
+      return false;
+    }
+    return CompareStmts(expected_loop->body, actual_loop->body, path + ".body",
+                        reason);
+  }
+  if (const auto *expected_store = expected.as<BufferStoreNode>()) {
+    const auto *actual_store = actual.as<BufferStoreNode>();
+    if (actual_store == nullptr) {
+      *reason = path + ": expected a store, got " + DescribeStmt(actual);
+      return false;
+    }
+    if (!expected_store->buffer.same_as(actual_store->buffer)) {
+      *reason = path + ": store target differs";
+      return false;
+    }
+    if (!ffi::StructuralEqual()(expected_store->indices, actual_store->indices)) {
+      *reason = path + ": store indices differ";
+      return false;
+    }
+    return CompareExpr(expected_store->value, actual_store->value,
+                       path + ".value", reason);
+  }
+  if (const auto *expected_eval = expected.as<EvaluateNode>()) {
+    const auto *actual_eval = actual.as<EvaluateNode>();
+    if (actual_eval == nullptr) {
+      *reason = path + ": expected an evaluate, got " + DescribeStmt(actual);
+      return false;
+    }
+    return CompareExpr(expected_eval->value, actual_eval->value,
+                       path + ".value", reason);
+  }
+  if (const auto *expected_seq = expected.as<SeqStmtNode>()) {
+    const auto *actual_seq = actual.as<SeqStmtNode>();
+    if (actual_seq == nullptr) {
+      *reason = path + ": expected a statement sequence, got " +
+                DescribeStmt(actual);
+      return false;
+    }
+    if (expected_seq->seq.size() != actual_seq->seq.size()) {
+      std::ostringstream os;
+      os << path << ": statement count differs (expected "
+         << expected_seq->seq.size() << ", got " << actual_seq->seq.size()
+         << ")";
+      *reason = os.str();
+      return false;
+    }
+    for (size_t i = 0; i < expected_seq->seq.size(); ++i) {
+      if (!CompareStmts(expected_seq->seq[i], actual_seq->seq[i],
+                        path + "[" + std::to_string(i) + "]", reason))
+        return false;
+    }
+    return true;
+  }
+  if (ffi::StructuralEqual()(expected, actual))
+    return true;
+  *reason = path + ": statement differs (expected " + DescribeStmt(expected) +
+            ", got " + DescribeStmt(actual) + ")";
+  return false;
+}
+
 } // namespace
 
+VSimdRegionMatch CompareRegionWithOriginal(const VSimdRegion &region,
+                                           const Stmt &original) {
+  VSimdRegionMatch result;
+  std::string unsupported;
+  Stmt expanded = ExpandVSimdRegionToLoops(region, &unsupported);
+  if (!expanded.defined()) {
+    result.ok = false;
+    result.reason = unsupported.empty()
+                        ? "reference expander produced no statement"
+                        : unsupported;
+    return result;
+  }
+
+  std::vector<Buffer> original_decls;
+  std::vector<Buffer> expanded_decls;
+  std::vector<Stmt> original_stmts = NormalizeSeq(original, &original_decls);
+  std::vector<Stmt> expanded_stmts = NormalizeSeq(expanded, &expanded_decls);
+  // DeclBuffer statements are extracted only so they do not disturb the
+  // statement streams. They are not compared: a T.view declaration may live
+  // outside the Parallel loop (the DSL hoists it), and the reconstruction
+  // re-declares exactly `region->local_views` by construction, which
+  // VerifyExpandedRegion checks separately.
+  (void)original_decls;
+  (void)expanded_decls;
+  if (original_stmts.size() != expanded_stmts.size()) {
+    std::ostringstream os;
+    os << "body statement count differs (original " << original_stmts.size()
+       << ", reconstructed " << expanded_stmts.size() << ")";
+    result.ok = false;
+    result.reason = os.str();
+    return result;
+  }
+  for (size_t i = 0; i < original_stmts.size(); ++i) {
+    if (!CompareStmts(original_stmts[i], expanded_stmts[i],
+                      "body[" + std::to_string(i) + "]", &result.reason)) {
+      result.ok = false;
+      return result;
+    }
+  }
+  return result;
+}
+
 VSimdRegionLift BuildRegion(const VSimdCaptureInfo &info,
-                            const std::string &memory_status) {
+                            const std::string &memory_status,
+                            bool verify_body) {
   VSimdRegionLift result;
   if (info.status != "CLOSED") {
     result.reason = "capture/scope is not CLOSED";
@@ -314,6 +514,23 @@ VSimdRegionLift BuildRegion(const VSimdCaptureInfo &info,
     result.internal_error = true;
     result.reason = "internal expander verification failed: " + verify.reason;
     return result;
+  }
+
+  // Structural oracle: the reconstruction must reproduce the original Parallel
+  // subtree statement by statement. A mismatch means the region lost, reordered
+  // or altered something, so P3 could not be trusted to replace the loop.
+  if (verify_body && info.root_for != nullptr) {
+    VSimdRegionMatch match =
+        CompareRegionWithOriginal(region, ffi::GetRef<Stmt>(info.root_for));
+    if (!match.ok) {
+      LOG(WARNING) << "[vsimd] region does not match the original Parallel "
+                      "body (compiler bug): "
+                   << match.reason;
+      result.internal_error = true;
+      result.reason =
+          "region does not match the original Parallel body: " + match.reason;
+      return result;
+    }
   }
 
   result.lifted = true;
@@ -458,11 +675,15 @@ VSimdRegionVerify VerifyExpandedRegion(const VSimdRegion &region,
   return result;
 }
 
-String AnalyzeVSimdRegionReport(const PrimFunc &func) {
-  std::vector<VSimdMemoryRegionStatus> memory_regions =
-      AnalyzeVSimdMemoryRegions(func);
-  std::vector<VSimdCaptureInfo> infos = AnalyzeVSimdCaptureInfo(func);
+bool RegionVerifyEnabled() {
+  return tvm::transform::PassContext::Current()
+      ->GetConfig<Bool>("tl.ascend_simd_region_verify", Bool(true))
+      .value();
+}
 
+String RenderVSimdRegionReport(const std::vector<VSimdCaptureInfo> &infos,
+                               const std::vector<VSimdMemoryRegionStatus> &memory,
+                               bool verify_body) {
   std::ostringstream out;
   for (const VSimdCaptureInfo &info : infos) {
     if (info.nest_index < 0) {
@@ -475,14 +696,14 @@ String AnalyzeVSimdRegionReport(const PrimFunc &func) {
     // Gate each nest on its own legality status: an illegal sibling nest must
     // not disable a legal one (the P1 pass already works per nest).
     std::string memory_status = "MISSING";
-    for (const VSimdMemoryRegionStatus &status : memory_regions) {
+    for (const VSimdMemoryRegionStatus &status : memory) {
       if (status.vf_index == info.vf_index &&
           status.nest_index == info.nest_index) {
         memory_status = status.status;
         break;
       }
     }
-    VSimdRegionLift lift = BuildRegion(info, memory_status);
+    VSimdRegionLift lift = BuildRegion(info, memory_status, verify_body);
     out << "VF#" << info.vf_index << " nest " << info.nest_index << ": ";
     if (!lift.lifted) {
       if (lift.internal_error) {
@@ -503,29 +724,48 @@ String AnalyzeVSimdRegionReport(const PrimFunc &func) {
     std::ostringstream expanded;
     expanded << expanded_stmt;
     out << "  expanded:\n    " << expanded.str() << "\n";
-    out << "  verify: OK\n";
+    // Reflect the switch instead of always claiming a check that may not have
+    // run: the report is the only place the difference is observable.
+    out << "  verify: " << (verify_body ? "OK" : "skipped") << "\n";
   }
   if (out.str().empty())
     return String("no SIMD_VF blocks\n");
   return String(out.str());
 }
 
+String AnalyzeVSimdRegionReport(const PrimFunc &func) {
+  return RenderVSimdRegionReport(AnalyzeVSimdCaptureInfo(func),
+                                 AnalyzeVSimdMemoryRegions(func),
+                                 RegionVerifyEnabled());
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def(
-      "tl.vsimd.expand_region", [](VSimdRegion region) {
-        // The expander reads per-kind fields unconditionally, so validate the
-        // region at the entry point instead of dereferencing a malformed one.
-        std::string error;
-        if (!VerifyRegion(region, &error))
-          TVM_FFI_THROW(ValueError) << "invalid vsimd region: " << error;
-        std::string unsupported;
-        Stmt expanded = ExpandVSimdRegionToLoops(region, &unsupported);
-        Array<ffi::Any> out;
-        out.push_back(expanded.defined() ? ffi::Any(expanded) : ffi::Any());
-        out.push_back(ffi::Any(String(unsupported)));
-        return out;
-      });
+  refl::GlobalDef()
+      .def(
+          "tl.vsimd.expand_region", [](VSimdRegion region) {
+            // The expander reads per-kind fields unconditionally, so validate
+            // the region at the entry point instead of dereferencing a
+            // malformed one.
+            std::string error;
+            if (!VerifyRegion(region, &error))
+              TVM_FFI_THROW(ValueError) << "invalid vsimd region: " << error;
+            std::string unsupported;
+            Stmt expanded = ExpandVSimdRegionToLoops(region, &unsupported);
+            Array<ffi::Any> out;
+            out.push_back(expanded.defined() ? ffi::Any(expanded) : ffi::Any());
+            out.push_back(ffi::Any(String(unsupported)));
+            return out;
+          })
+      .def(
+          "tl.vsimd.check_region_against",
+          [](VSimdRegion region, Stmt original) {
+            std::string error;
+            if (!VerifyRegion(region, &error))
+              TVM_FFI_THROW(ValueError) << "invalid vsimd region: " << error;
+            VSimdRegionMatch match = CompareRegionWithOriginal(region, original);
+            return String(match.ok ? "" : match.reason);
+          });
 }
 
 } // namespace tl
