@@ -498,6 +498,50 @@ def test_fragment_group_downgrades_mates():
     assert "grouped with an OPAQUE" in regions[1].reason
 
 
+def test_group_ids_follow_region_order():
+    """Group numbering is derived from region order, not from DSU internals.
+
+    Two disjoint fragment chains: the group holding the earlier region gets the
+    smaller id, so the annotation text is reproducible across runs.
+    """
+
+    n = 64
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((n,), "float32"),
+        B: T.Tensor((n,), "float32"),
+        C: T.Tensor((n,), "float32"),
+        D: T.Tensor((n,), "float32"),
+    ):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((n,), "float32")
+            b_ub = T.alloc_shared((n,), "float32")
+            c_ub = T.alloc_shared((n,), "float32")
+            d_ub = T.alloc_shared((n,), "float32")
+            frag_a = T.alloc_fragment((n,), "float32")
+            frag_b = T.alloc_fragment((n,), "float32")
+            T.copy(A, a_ub)
+            T.copy(B, b_ub)
+            with T.SimdVF():
+                for i in T.Parallel(n):
+                    frag_a[i] = a_ub[i]
+                for i in T.Parallel(n):
+                    frag_b[i] = b_ub[i]
+                for i in T.Parallel(n):
+                    c_ub[i] = frag_a[i]
+                for i in T.Parallel(n):
+                    d_ub[i] = frag_b[i]
+            T.copy(c_ub, C)
+            T.copy(d_ub, D)
+
+    regions = _regions(_lift(main))
+    assert len(regions) == 4
+    # frag_a connects regions 0 and 2, frag_b connects 1 and 3.
+    assert int(regions[0].group) == int(regions[2].group) == 0
+    assert int(regions[1].group) == int(regions[3].group) == 1
+
+
 def test_p1_can_be_disabled_by_config():
     n = 64
 
