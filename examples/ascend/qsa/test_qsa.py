@@ -31,3 +31,24 @@ def test_pipelined_forward(dynamic_shape):
 def test_sequential_forward(dynamic_shape):
     # NI = 2: sequential loop, 16-row chunks, single KV version.
     _check(33, 2048, 256, dynamic_shape=dynamic_shape)
+
+
+def test_two_tile_handoff():
+    pytest.importorskip("torch_npu")
+    if not torch.npu.is_available():
+        pytest.skip("Ascend NPU required")
+    torch.npu.set_op_timeout_ms(30000)
+    tokens, kv_length, slots = 16, 2048, 256
+    kernel = compile_qsa(tokens, kv_length, slots)
+    query = torch.zeros(tokens, 24, 256, dtype=torch.bfloat16, device="npu")
+    key = torch.zeros(kv_length, 2, 256, dtype=torch.bfloat16, device="npu")
+    indices = torch.arange(slots, dtype=torch.int32, device="npu").repeat(tokens, 1)
+    masked = indices.clone()
+    masked[:, 128:] = -1
+    for first, second in ((0, 2), (4, -2), (-2, 0)):
+        value = key.clone()
+        value[:128].fill_(first)
+        value[128:256].fill_(second)
+        for selection, expected in ((indices, (first + second) / 2), (masked, first)):
+            output = run_qsa(kernel, query, key, value, selection)
+            torch.testing.assert_close(output, torch.full_like(output, expected), rtol=0, atol=0)
