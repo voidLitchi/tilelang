@@ -30,6 +30,20 @@ python -m examples.ascend.qsa.compare_gbsa --batch 1 --queries 1 --kv 262144 --d
 
 `--kv` 是每个请求包含当前 query 的 KV 长度，`--queries` 是每请求的右对齐 query 数，不是 batch。`--batch 128 --queries 1 --kv 65536` 与 PR 共享同一 KV 池的“128 decode”不同，独立请求仅 BF16 K+V 就需 16 GiB，先用小 batch。要留出 profiler、输出和算子 workspace。打印当前设备和 seed；记录 CANN/OPP/TileLang revision、卡型号和重复次数，尽量独占卡。
 
+## PV 同步精度回归
+
+在同一台 950 上，从 TileLang 根目录分别执行：
+
+```bash
+python3 -m examples.ascend.qsa.diagnose_pv_sync --pv-ready --all
+python3 -m examples.ascend.qsa.compare_gbsa --pv-ready --check --check-rows 0
+python3 -m examples.ascend.qsa.compare_gbsa --pv-ready --check --check-rows 0 --dynamic
+```
+
+第一条依次执行 `test_qsa.py` 的 5 项回归和 `run.py` 的 3 个默认规格（各跑静态、动态两版），只做精度验证。任一断言失败会中止。后两条在同一组输入上分别检查 TileLang 和 GBSA，默认小规格为 2 个请求、每请求 4 个 query，`--check-rows 0` 检查这 8 行。可在新进程中省略 `--pv-ready` 做原版对照。
+
+诊断模式关闭 TileLang 编译缓存。对于已核对源码的两块顺序路径，日志 `added FIX 15/31` 表示在第二次 PV 写入临时 UB 后新增了发往两个 AIV 的通知，且两个向量累加调用前均已增加等待。对于默认对标的 17 块路径，`found native FIX 12/28` 表示生成源码已有对应的通知和等待，直接测试编译器原生输出。遇到未知且缺少上述同步的源码会报错。该开关用于验证 QSA 的一条生产者到消费者依赖。
+
 ## 公平性与计时
 
 同一次运行两者共享 BF16 Q/K/V。每个 query 从因果可见前缀随机无放回选至多 512 个完整四元块，升序排列，保留 0–3 个尾 token；可用 `--seed` 改变分布。这是可复现的模型契约工作负载，不是真实 indexer trace。GBSA 用 TND/TND、两头重复块号、每行实际 count、int64 cu-prefix、mask=1、residual=1、softmax_precision=0；QSA 用相同选块展开为全局 token 地址，加 batch 偏移、显式尾、补 -1 到 2176，拆 safe/valid。scale 均为 1/16。默认 smoke 含非四对齐 batch 起点和尾长 0/1/2/3。

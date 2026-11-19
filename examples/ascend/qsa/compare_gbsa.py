@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--scope", choices=("prepared", "adapter", "both"), default="both")
     parser.add_argument("--repeat", type=int, default=20)
     parser.add_argument("--dynamic", action="store_true")
+    parser.add_argument("--pv-ready", action="store_true", help="enable the QSA PV synchronization diagnostic when compiling TileLang")
     parser.add_argument("--probe-only", action="store_true", help="check the installed GBSA metadata contract without compiling QSA")
     args = parser.parse_args()
     batch, queries, kv = args.batch, args.queries, args.kv
@@ -112,6 +113,11 @@ def main():
     from tilelang.profiler import do_bench
     from examples.ascend.qsa.compile import compile_qsa
     from examples.ascend.qsa.testing import pad_q_heads, split_indices
+
+    if args.pv_ready:
+        from examples.ascend.qsa.diagnose_pv_sync import enable_pv_ready
+
+        enable_pv_ready()
 
     query = torch.randn(total, 24, 256, dtype=torch.bfloat16, device=device)
     key = torch.randn(batch * kv, 2, 256, dtype=torch.bfloat16, device=device)
