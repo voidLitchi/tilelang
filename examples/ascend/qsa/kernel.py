@@ -229,7 +229,9 @@ def qsa_fwd(total_q, total_kv, top_k=2176, sm_scale=None, *, dynamic_shape=False
             for task_block in T.Pipelined(
                 NI,
                 num_stages=2 if NI > 2 else 1,
-                annotations={"enable_offset": True},
+                # With two tiles the non-first and last guards coincide. Keep
+                # their snapshots in one iteration until epoch guards respect stages.
+                annotations={"enable_offset": NI != 2},
             ):
                 b = task_block * BI
                 if task_block == 0:

@@ -4,7 +4,7 @@
 
 **版本限制**：在 ops-transformer 的 `v9.3.0-beta.1` 标签上，950（A5）的 GBSA 只支持 PA_BBND KV、D=128、[1,128] 稀疏块、最多 256 个块且不支持隐式尾块。不能靠换 layout 或重排 K/V 做本例的等价对标。A2/A3 的规格不适用于 950。这里依赖的是安装的算子实现，不单由 CANN 的版本字符串决定；更新 Python extension 而仍加载旧主算子/Metadata 也不够。使用匹配工具链构建支持下述配置的两个算子与 extension，或换到已部署该版本的环境。先用 `python -m examples.ascend.qsa.compare_gbsa --probe-only` 检查实际加载的 Metadata；通过后仍须运行精度检查。
 
-对照版本：QSA PR #24 的 `7f546ecd`，再叠加 tile-ai/tilelang #3323 的两个提交（已解决与 QSA 基线的冲突，合成分支顶端 `1fb1cec3`）。不要求改动 QSA 算子。使用配套的驱动、CANN、PyTorch/torch_npu、TileLang 的 Ascend 后端；安装 ops-transformer **及其 cann_ops_transformer torch extension**，包括 GenericBlockSparseAttention 和 GenericBlockSparseAttentionMetadata 两个算子。脚本按 ops-transformer `6945d02b7` 的 Python API 编写。CANN 环境须先 source，确保自定义 OPP 和 extension 指向同一次安装。不要只切换 PYTHONPATH 而继续使用旧的 libtilelang.so。
+本分支基于 QSA PR #24 的 `7f546ecd`，叠加 tile-ai/tilelang #3323 的两个提交（合成后为 `1fb1cec3`），并在 QSA 的双 tile 路径关闭 stage offset。使用配套的驱动、CANN、PyTorch/torch_npu、TileLang 的 Ascend 后端，并安装 ops-transformer **及其 cann_ops_transformer torch extension**，包括 GenericBlockSparseAttention 和 GenericBlockSparseAttentionMetadata 两个算子。脚本按 ops-transformer `6945d02b7` 的 Python API 编写。CANN 环境须先 source，确保自定义 OPP 和 extension 指向同一次安装。切换构建后应核对实际加载的 libtilelang.so。
 
 将本分支推送后，在 950 服务器的干净 TileLang checkout 中执行以下命令。将 `origin` 替换为实际接收该分支的远端。脚本已包含在分支中，不需要 zip、bundle 或再次 cherry-pick。
 
@@ -35,14 +35,30 @@ python -m examples.ascend.qsa.compare_gbsa --batch 1 --queries 1 --kv 262144 --d
 在同一台 950 上，从 TileLang 根目录分别执行：
 
 ```bash
-python3 -m examples.ascend.qsa.diagnose_pv_sync --pv-ready --all
-python3 -m examples.ascend.qsa.compare_gbsa --pv-ready --check --check-rows 0
-python3 -m examples.ascend.qsa.compare_gbsa --pv-ready --check --check-rows 0 --dynamic
+python3 -m examples.ascend.qsa.diagnose_pv_sync --all
+python3 -m examples.ascend.qsa.compare_gbsa --check --check-rows 0
+python3 -m examples.ascend.qsa.compare_gbsa --check --check-rows 0 --dynamic
 ```
 
-第一条依次执行 `test_qsa.py` 的 5 项回归和 `run.py` 的 3 个默认规格（各跑静态、动态两版），只做精度验证。任一断言失败会中止。后两条在同一组输入上分别检查 TileLang 和 GBSA，默认小规格为 2 个请求、每请求 4 个 query，`--check-rows 0` 检查这 8 行。可在新进程中省略 `--pv-ready` 做原版对照。
+第一条依次执行 `test_qsa.py` 的 5 项回归和 `run.py` 的 3 个默认规格（各跑静态、动态两版），覆盖双 tile 和长流水。任一断言失败会中止。后两条的 QSA 编译规格固定为 2176 个槽位（17 tiles），分别将 TileLang、GBSA 与同一输入的 FP32 标杆比较，默认检查 2 个请求各 4 个 query 的全部 8 行。要单独跑双 tile 手工可验输入，执行 `python3 -m examples.ascend.qsa.diagnose_pv_sync`。
 
-诊断模式关闭 TileLang 编译缓存。对于已核对源码的两块顺序路径，日志 `added FIX 15/31` 表示在第二次 PV 写入临时 UB 后新增了发往两个 AIV 的通知，且两个向量累加调用前均已增加等待。对于默认对标的 17 块路径，`found native FIX 12/28` 表示生成源码已有对应的通知和等待，直接测试编译器原生输出。遇到未知且缺少上述同步的源码会报错。该开关用于验证 QSA 的一条生产者到消费者依赖。
+当前规避只在 `NI == 2` 时关闭 stage offset，保留 AutoSchedule、自动分配 flag 和自动插同步。上述三条命令均直接执行原生生成代码。可选的 `--pv-ready` 是旧版诊断工具，在已核对的新双 tile 代码上识别原生 FIX 8/29，在 17-tile 代码上识别原生 FIX 12/28。要复查旧版 A/B，请使用 `a6a20322` 的双 tile 单例，分别省略和加上 `--pv-ready`；在那里开关对已核对的旧源码补 FIX 15/31 及两处 AIV 等待。此前上板通过的是这个加同步的旧单例。
+
+## 在 tile-ai/tilelang/main 单独复现
+
+将本目录的 `repro_stage_guard.py` 复制到已构建的上游 TileLang 源码根目录，在该根目录执行。复核提交为 `4ed9b9edb5c9a1e05f52b3bd45e7116fea7ec9ab`。脚本只依赖上游 Ascend DSL，无需 QSA、GBSA 或 #3323。
+
+```bash
+PYTHONPATH="$PWD" python3 repro_stage_guard.py --dump-dir /tmp/stage-guard --check-ir
+# 独立运行设备检查。先跑同 stage 对照，再跑错位变体，逐元素精确比较。
+PYTHONPATH="$PWD" python3 repro_stage_guard.py --run --repeat 100
+# 增大 DMA 长度，改变两条 pipe 的相对时序
+PYTHONPATH="$PWD" python3 repro_stage_guard.py --run --width 1024 --repeat 100
+```
+
+第一条在该提交上预期以断言失败退出，并留下两份 PrepareMultiBuffer IR 及两份最终 AscendC。相同 stage 的两个条件可安全共享。错位变体中，`x` 的条件在 stage 1 取样，`y` 在 stage 0 取样，两者仍被映射到同一条件。最终 `stage1.asc` 的物理迭代 1 搬入第二行后，搬出同一 UB 前缺少 MTE2→MTE3 同步；物理迭代 2 的握手只覆盖第一行。
+
+默认输入每行 8 个 FP32。第 0 次运行使用全 0 和全 2 两行，期望 `C == A`。第二行暂存 UB 预填为 0，若搬出先于第二行搬入完成，实得 0、期望 2。设备报错包含 stage、轮次、行列及数值。单次设备结果取决于 DMA 时序，IR 检查可独立复现。
 
 ## 公平性与计时
 

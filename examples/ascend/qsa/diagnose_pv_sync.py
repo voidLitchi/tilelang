@@ -6,19 +6,21 @@ from pathlib import Path
 
 
 def add_pv_ready(source, target):
-    consumers = {"main_kernel_simd_vf_2(buf_dyn_shmem);", "main_kernel_simd_vf_2_1(buf_dyn_shmem);"}
+    consumers = ("main_kernel_simd_vf_2(buf_dyn_shmem);", "main_kernel_simd_vf_2_1(buf_dyn_shmem);")
     lines = source.splitlines(keepends=True)
     copies = [i for i, line in enumerate(lines) if "asc_copy_l0c2ub(" in line and "buf_dyn_shmem)[8192]" in line]
     readers = [i for i, line in enumerate(lines) if line.strip() in consumers]
-    if len(copies) != 1 or {lines[i].strip() for i in readers} != consumers or len(readers) != 2:
+    if len(copies) != 1 or {lines[i].strip() for i in readers} != set(consumers) or len(readers) != 2:
         raise ValueError("Unrecognized QSA PV copy or AIV accumulator calls")
     copy = copies[0]
-    ready = ["asc_sync_intra_arrive(PIPE_FIX, 12);", "asc_sync_intra_arrive(PIPE_FIX, 28);"]
-    if [line.strip() for line in lines[copy + 1 : copy + 3]] == ready and all(
-        lines[i - 1].strip() == "asc_sync_intra_wait(PIPE_V, 12);" for i in readers
-    ):
-        print("pv-ready: found native FIX 12/28 and both AIV waits; using original AscendC", flush=True)
-        return source
+    signals = {line.strip() for line in lines[copy + 1 : copy + 3]}
+    for aiv0, aiv1 in ((12, 12), (8, 13)):
+        if signals != {f"asc_sync_intra_arrive(PIPE_FIX, {aiv0});", f"asc_sync_intra_arrive(PIPE_FIX, {16 + aiv1});"}:
+            continue
+        waits = dict(zip(consumers, (f"asc_sync_intra_wait(PIPE_V, {aiv0});", f"asc_sync_intra_wait(PIPE_V, {aiv1});"), strict=True))
+        if all(lines[i - 1].strip() == waits[lines[i].strip()] for i in readers):
+            print(f"pv-ready: found native FIX {aiv0}/{16 + aiv1} and both AIV waits; using original AscendC", flush=True)
+            return source
 
     # Only rewrite the reviewed two-tile schedules. Dynamic addressing changes
     # the source digest even when the flag allocation and handoff are identical.
