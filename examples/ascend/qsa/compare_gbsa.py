@@ -44,13 +44,22 @@ def main():
     parser.add_argument("--repeat", type=int, default=20)
     parser.add_argument("--dynamic", action="store_true")
     parser.add_argument("--pv-ready", action="store_true", help="enable the QSA PV synchronization diagnostic when compiling TileLang")
-    parser.add_argument("--probe-only", action="store_true", help="check the installed GBSA metadata contract without compiling QSA")
+    parser.add_argument("--qsa-variant", choices=("baseline", "author-cube", "author-aiv"), default="baseline")
+    parser.add_argument("--pad-m", type=int, choices=(16, 32), default=32, help="physical rows per KV head (author variants support 16)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--qsa-once", action="store_true", help="launch one prepared QSA kernel, synchronize and exit (no GBSA, check or benchmark)"
+    )
+    mode.add_argument("--probe-only", action="store_true", help="check the installed GBSA metadata contract without compiling QSA")
     args = parser.parse_args()
     batch, queries, kv = args.batch, args.queries, args.kv
     if min(batch, queries, args.repeat) < 1 or kv < queries or args.check_rows < 0 or batch * kv >= 2**31:
         parser.error("require batch, queries, repeat > 0; kv >= queries; check-rows >= 0; batch*kv < 2^31")
 
-    import cann_ops_transformer
+    if args.pv_ready and args.qsa_variant != "baseline":
+        parser.error("--pv-ready only recognizes the baseline QSA schedule")
+    if args.qsa_variant == "baseline" and args.pad_m != 32:
+        parser.error("baseline requires --pad-m 32")
     import torch_npu
 
     device = torch.device("npu", torch.npu.current_device())
@@ -59,58 +68,54 @@ def main():
     total = batch * queries
     cpu_lists, cpu_counts = block_lists(batch, queries, kv, args.seed)
     lists, counts = cpu_lists.to(device), cpu_counts.to(device)
-    common = dict(
-        layout_q="TND",
-        layout_kv="TND",
-        mask_mode=1,
-        quant_mode=0,
-        softmax_precision=0,
-        residual_block_mode=1,
-        cu_seqlens_q=torch.arange(batch + 1, device=device, dtype=torch.int64) * queries,
-        cu_seqlens_kv=torch.arange(batch + 1, device=device, dtype=torch.int64) * kv,
-    )
-    ops = cann_ops_transformer.ops
+    if not args.qsa_once:
+        import cann_ops_transformer
 
-    def tl_inputs():
-        return pad_q_heads(query), *split_indices(token_slots(lists, counts, queries, kv))
-
-    def gb_inputs():
-        blocks = lists.unsqueeze(0).expand(2, -1, -1).contiguous()
-        sizes = counts.unsqueeze(0).expand(2, -1).contiguous()
-        metadata = ops.generic_block_sparse_attention_metadata(
-            blocks, sizes, 24, 2, 256, [1, 4], max_seqlen_q=queries, max_seqlen_kv=kv, **common
+        common = dict(
+            layout_q="TND",
+            layout_kv="TND",
+            mask_mode=1,
+            quant_mode=0,
+            softmax_precision=0,
+            residual_block_mode=1,
+            cu_seqlens_q=torch.arange(batch + 1, device=device, dtype=torch.int64) * queries,
+            cu_seqlens_kv=torch.arange(batch + 1, device=device, dtype=torch.int64) * kv,
         )
-        return blocks, sizes, metadata
+        ops = cann_ops_transformer.ops
 
-    def tl_run(padded, indices, valid):
-        return kernel(padded, key, value, indices, valid)
+        def gb_inputs():
+            blocks = lists.unsqueeze(0).expand(2, -1, -1).contiguous()
+            sizes = counts.unsqueeze(0).expand(2, -1).contiguous()
+            metadata = ops.generic_block_sparse_attention_metadata(
+                blocks, sizes, 24, 2, 256, [1, 4], max_seqlen_q=queries, max_seqlen_kv=kv, **common
+            )
+            return blocks, sizes, metadata
 
-    def gb_run(blocks, sizes, metadata):
-        return ops.generic_block_sparse_attention(
-            query, key, value, blocks, sizes, [1, 4], metadata=metadata, softmax_scale=1 / 16, **common
-        )[0]
+        def gb_run(blocks, sizes, metadata):
+            return ops.generic_block_sparse_attention(
+                query, key, value, blocks, sizes, [1, 4], metadata=metadata, softmax_scale=1 / 16, **common
+            )[0]
+
+        try:
+            gbsa_inputs = gb_inputs()
+            torch.npu.synchronize()
+        except RuntimeError as exc:
+            if "kvInputLayout currently only supports PA_BBND" not in str(exc):
+                raise
+            raise RuntimeError(
+                "Installed GBSA metadata rejects TND KV. On Ascend 950 the stock v9.3.0-beta.1 operator also "
+                "requires D=128, blockShape=[1,128], topK<=256 and residualBlockMode=0. Changing layout alone "
+                "cannot benchmark QSA (D=256, [1,4], 512 blocks + tail). Install matching main and metadata "
+                "operators and torch extension with QSA support; see COMPARE.md. No performance ratio computed."
+            ) from exc
+        if args.probe_only:
+            print("GBSA metadata accepted QSA TND parameters; attention execution and correctness were not tested.")
+            return
 
     def unpad(output):
         return output[:, :, :12].reshape(total, 24, 256)
 
-    try:
-        gbsa_inputs = gb_inputs()
-        torch.npu.synchronize()
-    except RuntimeError as exc:
-        if "kvInputLayout currently only supports PA_BBND" not in str(exc):
-            raise
-        raise RuntimeError(
-            "Installed GBSA metadata rejects TND KV. On Ascend 950 the stock v9.3.0-beta.1 operator also "
-            "requires D=128, blockShape=[1,128], topK<=256 and residualBlockMode=0. Changing layout alone "
-            "cannot benchmark QSA (D=256, [1,4], 512 blocks + tail). Install matching main and metadata "
-            "operators and torch extension with QSA support; see COMPARE.md. No performance ratio computed."
-        ) from exc
-    if args.probe_only:
-        print("GBSA metadata accepted QSA TND parameters; attention execution and correctness were not tested.")
-        return
-
     import tilelang
-    from tilelang.profiler import do_bench
     from examples.ascend.qsa.compile import compile_qsa
     from examples.ascend.qsa.testing import pad_q_heads, split_indices
 
@@ -122,14 +127,37 @@ def main():
     query = torch.randn(total, 24, 256, dtype=torch.bfloat16, device=device)
     key = torch.randn(batch * kv, 2, 256, dtype=torch.bfloat16, device=device)
     value = torch.randn_like(key)
-    kernel = compile_qsa(total, batch * kv, 2176, dynamic_shape=args.dynamic)
+
+    def tl_inputs():
+        k, v = key, value
+        if args.qsa_variant != "baseline":
+            from examples.ascend.qsa.kernel_gm2l1 import KV_PAD_ROWS
+
+            # Append only to the end of physical storage. Logical batch offsets,
+            # valid masks and GBSA lengths all continue to use the original KV.
+            k = torch.nn.functional.pad(k, (0, 0, 0, 0, 0, KV_PAD_ROWS))
+            v = torch.nn.functional.pad(v, (0, 0, 0, 0, 0, KV_PAD_ROWS))
+        return pad_q_heads(query, args.pad_m), k, v, *split_indices(token_slots(lists, counts, queries, kv))
+
+    kernel = compile_qsa(total, batch * kv, 2176, dynamic_shape=args.dynamic, variant=args.qsa_variant, pad_m=args.pad_m)
     tile_inputs = tl_inputs()
     print(
         f"device={torch.npu.get_device_name(device.index)} torch={torch.__version__} torch_npu={torch_npu.__version__} "
-        f"tilelang={tilelang.__file__} batch={batch} q/request={queries} kv/request={kv} slots=2176 seed={args.seed} dynamic={args.dynamic}"
+        f"tilelang={tilelang.__file__} batch={batch} q/request={queries} kv/request={kv} slots=2176 seed={args.seed} "
+        f"dynamic={args.dynamic} qsa_variant={args.qsa_variant} pad_m={args.pad_m}",
+        flush=True,
     )
+    if args.qsa_once:
+        torch.npu.synchronize()
+        output = kernel(*tile_inputs)
+        torch.npu.synchronize()
+        print(f"Completed one QSA launch, output shape={tuple(output.shape)}")
+        return
+
+    from tilelang.profiler import do_bench
+
     if args.check:
-        tile_output, gb_output = unpad(tl_run(*tile_inputs)), gb_run(*gbsa_inputs)
+        tile_output, gb_output = unpad(kernel(*tile_inputs)), gb_run(*gbsa_inputs)
         checked = min(args.check_rows or total, total)
         selected = torch.linspace(0, total - 1, checked, dtype=torch.float64).round().long().tolist()
         for row in selected:
@@ -149,8 +177,8 @@ def main():
                 )
         print(f"CPU FP32 verification passed: {checked}/{total} rows")
     for scope, tile_fn, gb_fn in (
-        ("prepared", lambda: tl_run(*tile_inputs), lambda: gb_run(*gbsa_inputs)),
-        ("adapter", lambda: unpad(tl_run(*tl_inputs())), lambda: gb_run(*gb_inputs())),
+        ("prepared", lambda: kernel(*tile_inputs), lambda: gb_run(*gbsa_inputs)),
+        ("adapter", lambda: unpad(kernel(*tl_inputs())), lambda: gb_run(*gb_inputs())),
     ):
         if args.scope not in (scope, "both"):
             continue

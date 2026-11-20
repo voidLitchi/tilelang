@@ -105,6 +105,7 @@ def qsa_fwd(
     num_stages=None,
     cube_gather=True,
     chunk_rows=None,
+    pad_m=None,
 ):
     """Build the QSA forward kernel. total_q / total_kv are num_tokens and
     kv_length; dynamic_shape=True makes them symbolic dimensions.
@@ -125,7 +126,12 @@ def qsa_fwd(
     the kernel body would evaluate to a bool and crash on `.items()`."""
     if top_k <= 0 or top_k % BLOCK_I:
         raise ValueError(f"top_k must be a positive multiple of {BLOCK_I}")
-    MP = PAD_M
+    MP = PAD_M if pad_m is None else pad_m
+    padded_kv = total_kv + KV_PAD_ROWS
+    if dynamic_shape:
+        total_q = T.dynamic("num_tokens")
+        padded_kv = T.dynamic("padded_kv_length")
+        total_kv = padded_kv - KV_PAD_ROWS
     D = HEAD_DIM
     BI = BLOCK_I
     VL = 64
@@ -329,8 +335,8 @@ def qsa_fwd(
     @T.prim_func
     def main(
         Q: T.Buffer((total_q, NUM_KV_HEADS, MP, D), dtype),
-        K: T.Buffer((total_kv + KV_PAD_ROWS, NUM_KV_HEADS, D), dtype),
-        V: T.Buffer((total_kv + KV_PAD_ROWS, NUM_KV_HEADS, D), dtype),
+        K: T.Buffer((padded_kv, NUM_KV_HEADS, D), dtype),
+        V: T.Buffer((padded_kv, NUM_KV_HEADS, D), dtype),
         Indices: T.Buffer((total_q, top_k), "int32"),
         Valid: T.Buffer((total_q, top_k), "int32"),
         O: T.Buffer((total_q, NUM_KV_HEADS, MP, D), dtype),

@@ -30,14 +30,14 @@ def split_indices(indices):
     return safe, valid
 
 
-def pad_q_heads(q):
+def pad_q_heads(q, pad_m=PAD_M):
     """Regroup Q to (num_tokens, num_kv_heads, group, head_dim), zero-pad
     group to MP rows."""
     total_q, num_heads, head_dim = q.shape
     group = num_heads // NUM_KV_HEADS
     qp = q.reshape(total_q, NUM_KV_HEADS, group, head_dim)
-    if group < PAD_M:
-        pad = qp.new_zeros(total_q, NUM_KV_HEADS, PAD_M - group, head_dim)
+    if group < pad_m:
+        pad = qp.new_zeros(total_q, NUM_KV_HEADS, pad_m - group, head_dim)
         qp = torch.cat([qp, pad], dim=2)
     return qp.contiguous()
 

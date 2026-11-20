@@ -62,6 +62,30 @@ PYTHONPATH="$PWD" python3 repro_stage_guard.py --run --width 1024 --repeat 100
 
 ## 公平性与计时
 
+### 作者版本和单次采集
+
+从本分支根目录运行。每条命令直接使用同一 seed、同一组 Q/K/V、选块、尾块和 FP32 标杆。默认 `baseline` 保留原来的调用。作者版本来自 `8ccb1d34` 的 `kernel_gm2l1.py`。
+
+```bash
+shape=(--batch 1 --queries 4096 --kv 32768)
+for variant in baseline author-aiv author-cube; do
+    python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant "$variant" --scope prepared --check --check-rows 16
+done
+python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant author-cube --pad-m 16 --scope prepared --check --check-rows 16
+```
+
+`author-aiv` 和 `author-cube` 共用作者的 PV 累加写法。先在 M=32 比较两条 gather 路径，再在同一路径比较 M=16 和 32，可以区分缩小矩阵和缩短 KV 搬运路径的收益。两种作者版本都在物理 KV 末尾补 3 行零，GBSA 和标杆继续使用逻辑 KV。prepared 提前补齐，adapter 将补齐开销计入每次调用。小 shape 可用 `--check-rows 0` 全检，也可加 `--dynamic`。
+
+单次模式只调用一次选定的 QSA 并同步返回。它跳过 GBSA 导入、Metadata、标杆、预热、清缓存和 do_bench。输入准备仍有 torch NPU 操作，外部采集用 kernel 名筛出 QSA。单次耗时与 prepared 的清缓存时间口径不同。
+
+```bash
+python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant author-cube --qsa-once
+msprof op --kernel-name=main_kernel --launch-count=1 --warm-up=0 --aic-metrics=PipeUtilization --output=./qsa-cube-pipes \
+    python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant author-cube --qsa-once
+```
+
+将 variant 换成 `baseline` 可采当前原版。切换 `Memory`、`L2Cache` 指标时分别指定输出目录，核对匹配到的 kernel 和 grid（本例 8192 tasks）。多指标组合可能由 profiler 重放。分支性能归因、950PR/DT 的 roofline 及计数器判读见 [prefill 性能分析](PREFILL.md)。
+
 同一次运行两者共享 BF16 Q/K/V。每个 query 从因果可见前缀随机无放回选至多 512 个完整四元块，升序排列，保留 0–3 个尾 token；可用 `--seed` 改变分布。这是可复现的模型契约工作负载，不是真实 indexer trace。GBSA 用 TND/TND、两头重复块号、每行实际 count、int64 cu-prefix、mask=1、residual=1、softmax_precision=0；QSA 用相同选块展开为全局 token 地址，加 batch 偏移、显式尾、补 -1 到 2176，拆 safe/valid。scale 均为 1/16。默认 smoke 含非四对齐 batch 起点和尾长 0/1/2/3。
 
 默认 `--check` 对最多 8 个均匀分布的 query，分别和 CPU FP32 gather/softmax/PV 比较，atol=rtol=0.01；`--check-rows 0` 全检，昂贵，仅用于小形状。失败直接退出而不报告有效性能。关闭精度只适合已验证场景。普通因果行非空，不包含原 PR 的 top_k=128 全无效缺陷。
