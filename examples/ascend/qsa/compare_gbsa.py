@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--pv-ready", action="store_true", help="enable the QSA PV synchronization diagnostic when compiling TileLang")
     parser.add_argument("--qsa-variant", choices=("baseline", "author-cube", "author-aiv"), default="baseline")
     parser.add_argument("--pad-m", type=int, choices=(16, 32), default=32, help="physical rows per KV head (author variants support 16)")
+    parser.add_argument("--stages", type=int, help="override the author kernel's pipeline depth (default 2 for 2176 slots)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--qsa-once", action="store_true", help="launch one prepared QSA kernel, synchronize and exit (no GBSA, check or benchmark)"
@@ -60,6 +61,8 @@ def main():
         parser.error("--pv-ready only recognizes the baseline QSA schedule")
     if args.qsa_variant == "baseline" and args.pad_m != 32:
         parser.error("baseline requires --pad-m 32")
+    if args.stages is not None and (args.qsa_variant == "baseline" or not 1 <= args.stages <= 17):
+        parser.error("--stages requires an author variant and a value from 1 to 17")
     import torch_npu
 
     device = torch.device("npu", torch.npu.current_device())
@@ -139,12 +142,14 @@ def main():
             v = torch.nn.functional.pad(v, (0, 0, 0, 0, 0, KV_PAD_ROWS))
         return pad_q_heads(query, args.pad_m), k, v, *split_indices(token_slots(lists, counts, queries, kv))
 
-    kernel = compile_qsa(total, batch * kv, 2176, dynamic_shape=args.dynamic, variant=args.qsa_variant, pad_m=args.pad_m)
+    kernel = compile_qsa(
+        total, batch * kv, 2176, dynamic_shape=args.dynamic, variant=args.qsa_variant, pad_m=args.pad_m, num_stages=args.stages
+    )
     tile_inputs = tl_inputs()
     print(
         f"device={torch.npu.get_device_name(device.index)} torch={torch.__version__} torch_npu={torch_npu.__version__} "
         f"tilelang={tilelang.__file__} batch={batch} q/request={queries} kv/request={kv} slots=2176 seed={args.seed} "
-        f"dynamic={args.dynamic} qsa_variant={args.qsa_variant} pad_m={args.pad_m}",
+        f"dynamic={args.dynamic} qsa_variant={args.qsa_variant} pad_m={args.pad_m} stages={args.stages or 2}",
         flush=True,
     )
     if args.qsa_once:

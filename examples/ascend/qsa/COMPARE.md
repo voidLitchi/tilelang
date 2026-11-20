@@ -74,6 +74,15 @@ done
 python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant author-cube --pad-m 16 --scope prepared --check --check-rows 16
 ```
 
+作者命令 `kernel_gm2l1.py --pad-m 16 --aiv-gather --stages 3` 选择 AIV 中转。对齐其 prefill 内核配置请用下面的命令，在 old、exp 的配套构建中分别使用同一份测试脚本：
+
+```bash
+python3 -m examples.ascend.qsa.compare_gbsa --batch 1 --queries 4096 --kv 32768 \
+    --qsa-variant author-aiv --pad-m 16 --stages 3 --scope prepared --check --check-rows 16
+```
+
+复核时，作者独立脚本取 `[prefill-qwen3.8]` 行。它的计时输入以 seed=1 从整个 KV 池取每行 512 个完整块（2048 个有效 token），预热 30 次。对标脚本默认 seed=7，从每行因果可见前缀选块并加尾，平均 2049.5 个有效 token，prepared 预热 10 次，两者默认均采 20 次。以上命令对齐内核配置，保留 GBSA 对标的输入契约。要拆分配置收益，固定分支和 seed，依次测 author-aiv 的 M32/stages2、M16/stages2、M16/stages3，最后在 M16/stages3 下只切换 gather。
+
 `author-aiv` 和 `author-cube` 共用作者的 PV 累加写法。先在 M=32 比较两条 gather 路径，再在同一路径比较 M=16 和 32，可以区分缩小矩阵和缩短 KV 搬运路径的收益。两种作者版本都在物理 KV 末尾补 3 行零，GBSA 和标杆继续使用逻辑 KV。prepared 提前补齐，adapter 将补齐开销计入每次调用。小 shape 可用 `--check-rows 0` 全检，也可加 `--dynamic`。
 
 单次模式只调用一次选定的 QSA 并同步返回。它跳过 GBSA 导入、Metadata、标杆、预热、清缓存和 do_bench。输入准备仍有 torch NPU 操作，外部采集用 kernel 名筛出 QSA。单次耗时与 prepared 的清缓存时间口径不同。
