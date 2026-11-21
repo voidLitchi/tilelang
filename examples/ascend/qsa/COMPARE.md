@@ -69,7 +69,7 @@ PYTHONPATH="$PWD" python3 repro_stage_guard.py --run --width 1024 --repeat 100
 ```bash
 shape=(--batch 1 --queries 4096 --kv 32768)
 for variant in baseline author-aiv author-cube; do
-    python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant "$variant" --scope prepared --check --check-rows 16
+    python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant "$variant" --aic-count 0 --scope prepared --check --check-rows 16
 done
 python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant author-cube --pad-m 16 --scope prepared --check --check-rows 16
 ```
@@ -78,7 +78,7 @@ python3 -m examples.ascend.qsa.compare_gbsa "${shape[@]}" --qsa-variant author-c
 
 ```bash
 python3 -m examples.ascend.qsa.compare_gbsa --batch 1 --queries 4096 --kv 32768 \
-    --qsa-variant author-aiv --pad-m 16 --stages 3 --scope prepared --check --check-rows 16
+    --qsa-variant author-aiv --aic-count 0 --pad-m 16 --stages 3 --scope prepared --check --check-rows 16
 ```
 
 复核时，作者独立脚本取 `[prefill-qwen3.8]` 行。它的计时输入以 seed=1 从整个 KV 池取每行 512 个完整块（2048 个有效 token），预热 30 次。对标脚本默认 seed=7，从每行因果可见前缀选块并加尾，平均 2049.5 个有效 token，prepared 预热 10 次，两者默认均采 20 次。以上命令对齐内核配置，保留 GBSA 对标的输入契约。要拆分配置收益，固定分支和 seed，依次测 author-aiv 的 M32/stages2、M16/stages2、M16/stages3，最后在 M16/stages3 下只切换 gather。
@@ -129,9 +129,9 @@ bisheng -O2 -fPIC -std=c++20 -mllvm -cce-aicore-dcpreload-args=false --npu-arch=
 
 ## 950 上的 M=16、三阶段调度实验
 
-在本分支的同一构建、CANN 环境、设备、时钟和 profiler 下运行。下面均使用 prepared 输入。测得的 6527 µs（old）和 6877 µs（exp）是原始分支数据。下表各实验的时间、精度和事件等待时长需要上板测量。
+在本分支的同一构建、CANN 环境、设备、时钟和 profiler 下运行。下面均使用 prepared 输入。测得的 6527 µs（old）和 6877 µs（exp）是原始分支数据。后续 28 核测量与新一轮对照见本文末节。
 
-| `--qsa-variant` | 不指定核数 | 加 `--aic-count 28`（也支持 32、36） |
+| `--qsa-variant` | `--aic-count 0` 普通网格 | 默认 28 核（也支持 32、36） |
 |---|---|---|
 | `author-aiv` | 当前编译器调度对照 | 同一 DSL 跨逻辑任务展开一层连续流水 |
 | `old-schedule` | 显式重放 old 的 AIC/AIV 指令、缓冲地址和事件 | 同一手工流水持续处理多个任务，增加输出缓冲复用保护 |
@@ -139,7 +139,7 @@ bisheng -O2 -fPIC -std=c++20 -mllvm -cce-aicore-dcpreload-args=false --npu-arch=
 | `padded-aiv` | 利用三个 KV 尾部 padding 行，移除四行 gather 的逐块边界分支 | 同一 AIV 实现用固定核数 |
 | `hybrid-k` | K 由 AIC 直接 ND→NZ 到独立 L1，V 保留 AIV relay | 对照相同核数的 `padded-aiv`，检查转移 K 流量后的关键路径 |
 
-前两个 `old-*` 实现关闭 AutoSchedule，固定 BF16、D=256、M=16、2176 槽、3 stages 和静态形状。普通网格每个 (query, KV head) 一个 mixed block。固定网格下，第 c 个 block 负责 c、c+C、c+2C 等任务。每任务 17 个 tile，缓冲下标和事件按连续 tile 编号轮转。Q 重载、softmax 状态初始化和最终 O 写出按任务发生。旧调度在无核数参数时保留为控制组。单次 kernel launch 中的逻辑 block 数与主机 launch 次数分别统计。
+前两个 `old-*` 实现关闭 AutoSchedule，固定 BF16、D=256、M=16、2176 槽、3 stages 和静态形状。普通网格每个 (query, KV head) 一个 mixed block。固定网格下，第 c 个 block 负责 c、c+C、c+2C 等任务。每任务 17 个 tile，缓冲下标和事件按连续 tile 编号轮转。Q 重载、softmax 状态初始化和最终 O 写出按任务发生。使用 `--aic-count 0` 可复测普通网格。单次 kernel launch 中的逻辑 block 数与主机 launch 次数分别统计。
 
 **先验证精度。** 在 28 AIC 的 PR 上，下面的多 batch 用例有 60 个逻辑任务，覆盖第三轮复用以及跨请求的不足四行尾块。大规格全行 FP32 校验耗时较长，可与性能采集分别运行。
 
@@ -150,17 +150,17 @@ for v in author-aiv old-schedule old-prefetch padded-aiv hybrid-k; do
   qsa --batch 2 --queries 15 --kv 2057 --qsa-variant "$v" --aic-count 28 --check --check-rows 0
   qsa "${shape[@]}" --qsa-variant "$v" --aic-count 28 --check --check-rows 0
 done
-qsa "${shape[@]}" --qsa-variant old-schedule --check --check-rows 0
-qsa "${shape[@]}" --qsa-variant old-prefetch --check --check-rows 0
+qsa "${shape[@]}" --qsa-variant old-schedule --aic-count 0 --check --check-rows 0
+qsa "${shape[@]}" --qsa-variant old-prefetch --aic-count 0 --check --check-rows 0
 ```
 
 **性能归因。** 以下第一组固定新分支，单独切换机器码调度。第二组在同一旧调度上交叉切换核数和索引路径。第三组比较两种搬运通道。建议倒序复测并记录每轮 GBSA 行作环境对照。更换设备时用对应的 AIC 数。
 
 ```bash
 timed() { qsa "${shape[@]}" --repeat 50 --no-check "$@"; }
-for v in author-aiv old-schedule old-schedule author-aiv; do timed --qsa-variant "$v"; done
+for v in author-aiv old-schedule old-schedule author-aiv; do timed --qsa-variant "$v" --aic-count 0; done
 for v in old-schedule old-prefetch; do
-  timed --qsa-variant "$v"
+  timed --qsa-variant "$v" --aic-count 0
   timed --qsa-variant "$v" --aic-count 28
 done
 for v in author-aiv padded-aiv hybrid-k; do timed --qsa-variant "$v" --aic-count 28; done
@@ -176,3 +176,37 @@ qsa "${shape[@]}" --qsa-variant old-prefetch --aic-count 28 --qsa-once
 这组 M16/stages3 对照中，old/exp 每个 AIV 每逻辑任务均发出 578 次 GM→UB，包括 544 次 K/V、17 次 Indices 和 17 次 Valid。exp 的 AIV1 在 softmax 读 S 后向 FIX 归还槽位，展开后每任务增加 19 次通知及 19 次对应的 AIC 等待（含首尾）。静态计数不能换算出 350 µs。固定索引预取把普通网格中的 17 次 Indices DMA 合为一次，字节数不变。按板上 6527 µs 和 86% 的忙时占比，在工作量、忙时和其他通道均不变的假设下，完全填补空泡的时间下限约为 5613 µs。
 
 `hybrid-k` 每个 tile 的 32 笔 K 搬运均为 4×256 BF16 的 GM→L1 ND→NZ，写入 NZ 目标的行跨度为 128。每个逻辑任务约一半 K/V 请求转移到 AIC。该实验使用 scalar 从 GM 读 quad 基址，生成代码中本 tile 的 QK 仍需等 32 笔 K 搬完。GBSA 在 `ops-transformer@6945d02b7` 的 Arch35 regular 路径为 QK、PV 打开稀疏偏移预计算；QK 预热描述符 cache line，根据记录设置实际 nValue、ndNum 和矩阵步长，PV 分组加载 V。若 hybrid 的 AIV 等待缩短而 AIC 转为瓶颈，可优先试描述符预取、成对发射和下一 tile 的 K 提前装载。两路 DMA 共享下层存储带宽，实际收益取决于短 DMA 的发射效率、缓存命中和跨 tile 重叠。
+
+## 950PR 28 核的 chunk 间隙与 K 直搬实验
+
+在 batch=1、queries=4096、kv=32768、M=16、三阶段下，板上实测普通网格 old-schedule 约 6500 µs，28 核连续调度为 6183 µs，AIV-MTE2 忙时约 89%。old-prefetch 与 old-schedule 的端到端耗时、流水均接近。以下 CLI 对 AIV 和 hybrid 默认用 28 核，日志应显示 `blocks=28`。对历史普通网格使用 `--aic-count 0`。
+
+每个 AIV 的 32 行 chunk 在完整 quad 路径上由 8 笔 2 KiB DMA 填满。每两个 chunk 轮转一次 ND/NZ 槽。旧代码在提交第二组 DMA 前先提交第一组的 ND→NZ、槽位通知和 UB→L1。若 scatter 等待前次 MTE3 归还 NZ 槽，它向 MTE2 归还 ND 槽的时刻也会推迟。V 的第一个 chunk 另有 L1 槽归还等待。硬件事件作用于指定 pipe，能否在 Scalar 发射下一组之前实际阻塞，要看队列和完成时刻。相邻 chunk 的空白无法仅由源码分摊给这些依赖。
+
+| 28 核变体 | 对照变量 | 读板上流水 |
+|---|---|---|
+| `old-schedule` | 6183 µs 基线 | 按同一 AIV 分别标出第 8→9 笔、16 笔后的边界，以及 K→V、V→K 边界 |
+| `old-chunk-ahead` | 两个 ND 槽先各发 8 笔，再依次 scatter 和写 L1；沿用原有槽位、DMA 数及就绪和归还事件 | 第 8→9 笔间隙若缩短，说明提交顺序影响了供给。若空闲移到第 16 笔之后，检查每对 chunk 的总时长和端到端耗时 |
+| `old-hybrid-k` | AIC 在 QK 当轮将 K 搬到独立双槽；AIV 搬 V | 检查 AIC 每 32 笔 4×256 BF16 ND→NZ 后，MTE1 等 K 的时间，同时看 AIV 搬 V 的绝对忙时 |
+| `old-hybrid-k-ahead` | 同一 hybrid，QK(j) 入队后，先发 K(j+1)，再做 PV(j−1)；跨逻辑任务轮转 | 对齐同一 tile，检查 K(j+1) 与 QK(j)、PV(j−1)、AIV 的 V 是否重叠，以及前置 32 次基址读取是否推迟 PV 或 FIX |
+
+两个 hybrid 每逻辑任务将 544 笔 K 搬运移至 AIC，整次运行对应约 9.13 GB 逻辑请求。AIC 用 MTE2→MTE1 就绪事件和反向归还事件保护 K 双槽。两个 AIV 各自写 V 的一半，AIC 在 PV 最后一次 L1→L0B 后归还 V 槽。移除 AIV 的 K relay 后，Valid 有独立的 MTE2→V 就绪事件，索引的 MTE2→Scalar 等待移到 V 的首次读取前。
+
+本地 CANN 9.2.0-beta.2 的 dav-3510 JIT 已编译这四个 28 核变体。old-schedule 的设备 `.text` 与上一轮的 28 核产物逐字节一致。old-chunk-ahead 与 old-schedule 的 AIC 入口机器码一致，两种显式 hybrid 的 AIV 入口机器码也一致。主机侧检查覆盖了实际索引地址、K 的 NZ 槽地址和事件配对。三个新变体的数值和延时须由服务器实测。
+
+```bash
+qsa() { python3 -m examples.ascend.qsa.compare_gbsa --scope prepared --pad-m 16 --stages 3 "$@"; }
+shape=(--batch 1 --queries 4096 --kv 32768 --seed 7)
+variants=(old-chunk-ahead old-hybrid-k old-hybrid-k-ahead)
+for v in "${variants[@]}"; do
+  qsa --batch 2 --queries 15 --kv 2057 --qsa-variant "$v" --check --check-rows 0
+  qsa "${shape[@]}" --qsa-variant "$v" --check --check-rows 0
+done
+for v in old-schedule "${variants[@]}" old-schedule; do
+  qsa "${shape[@]}" --qsa-variant "$v" --no-check --repeat 50
+done
+# 替换变体名，分别采单次 QSA。
+qsa "${shape[@]}" --qsa-variant old-hybrid-k-ahead --qsa-once
+```
+
+如果 89% 是同一观测窗口的忙时比例，保持 AIV 搬运量和绝对忙时，填平所有空闲对应约 5503 µs，比 6183 µs 少约 680 µs。hybrid 改变了各 pipe 分担的工作量，比较它时用端到端时间、各 pipe 的绝对忙时和字节数。若提前提交 chunk 后仍有相同间隙，仿真可截取稳态的相邻两对 chunk，跟踪 Scalar 提交下一条 GM→UB、MTE2 接收与开始执行、ND 槽 V→MTE2 归还、NZ 槽 MTE3→V 归还，以及 V 的 L1 跨核归还时刻。这样可以区分发射迟、复用等待和已提交 DMA 的服务间隔。

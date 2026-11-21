@@ -45,10 +45,17 @@ def main():
     parser.add_argument("--dynamic", action="store_true")
     parser.add_argument("--pv-ready", action="store_true", help="enable the QSA PV synchronization diagnostic when compiling TileLang")
     parser.add_argument(
-        "--qsa-variant", choices=("baseline", "author-cube", "author-aiv", "old-schedule", "old-prefetch", "padded-aiv", "hybrid-k"),
+        "--qsa-variant",
+        choices=(
+            "baseline", "author-cube", "author-aiv", "old-schedule", "old-prefetch", "old-chunk-ahead",
+            "old-hybrid-k", "old-hybrid-k-ahead", "padded-aiv", "hybrid-k",
+        ),
         default="baseline",
     )
-    parser.add_argument("--aic-count", type=int, choices=(28, 32, 36), help="persistent mixed-core blocks for the AIV and hybrid experiments")
+    parser.add_argument(
+        "--aic-count", type=int, choices=(0, 28, 32, 36),
+        help="AIV/hybrid grid: default 28 persistent blocks; 0 uses one block per logical task",
+    )
     parser.add_argument("--pad-m", type=int, choices=(16, 32), default=32, help="physical rows per KV head (author variants support 16)")
     parser.add_argument("--stages", type=int, help="override the author kernel's pipeline depth (default 2 for 2176 slots)")
     mode = parser.add_mutually_exclusive_group()
@@ -67,9 +74,12 @@ def main():
         parser.error("baseline requires --pad-m 32")
     if args.stages is not None and (args.qsa_variant == "baseline" or not 1 <= args.stages <= 17):
         parser.error("--stages requires an author variant and a value from 1 to 17")
+    if args.aic_count is None and args.qsa_variant not in ("baseline", "author-cube"):
+        args.aic_count = 28
+    args.aic_count = args.aic_count or None
     if args.aic_count and args.qsa_variant in ("baseline", "author-cube"):
         parser.error("--aic-count requires an AIV or hybrid variant")
-    if args.qsa_variant in ("old-schedule", "old-prefetch"):
+    if args.qsa_variant.startswith("old-"):
         if args.dynamic or args.pad_m != 16 or args.stages not in (None, 3):
             parser.error("the explicit old schedule requires static shapes, --pad-m 16 and --stages 3")
         args.stages = 3

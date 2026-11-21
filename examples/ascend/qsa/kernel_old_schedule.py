@@ -5,11 +5,20 @@ from pathlib import Path
 import tilelang.ascend.language as T
 
 
-def qsa_old_schedule(total_q, total_kv, prefetch, aic_count):
+def qsa_old_schedule(total_q, total_kv, prefetch, aic_count, *, direct_k=False, lookahead_k=False, pair_chunks=False):
+    if direct_k and prefetch:
+        raise ValueError("Direct K uses the tile-wise index ring for V")
+    if lookahead_k and not direct_k:
+        raise ValueError("K lookahead requires direct K")
     # The captured schedule indexes GM in int32 elements.
     if min(total_q, total_kv) < 1 or max(total_q * 8192, (total_kv + 3) * 512) > 2**31:
         raise ValueError("The explicit schedule requires nonempty inputs addressable with int32 element offsets")
     prelude = Path(__file__).with_name("qsa_old_schedule.h").read_text(encoding="utf-8")
+    if direct_k:
+        k_load = Path(__file__).with_name("qsa_k_l1.h").read_text(encoding="utf-8")
+        prelude = f"#define QSA_K_AHEAD {int(lookahead_k)}\n{k_load}\n{prelude}"
+    if pair_chunks:
+        prelude = "#define QSA_PAIR_CHUNKS\n" + prelude
     task = f"qsa_old_task<{str(prefetch).lower()}, {total_kv - 4}, {aic_count or 0}, {total_q * 2}>"
     index_rows = 2 if aic_count else 1
     ub_bytes = 111104 + (index_rows * 2176 * 4 if prefetch else 0)

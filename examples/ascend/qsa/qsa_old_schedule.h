@@ -110,6 +110,26 @@ __aicore__ inline int qsa_row_slot_offset(int tile) {
   return ((tile / 17) & 1) * 2176 + (tile % 17) * 128;
 }
 
+// Every pair starts on an even ND version. The experiment issues both
+// gathers before scattering and draining the two slots in their old order.
+#ifdef QSA_PAIR_CHUNKS
+#define QSA_GATHER_SLOT(chunk) (chunk)
+#define QSA_GATHER_QUADS (issue < 2 ? 8 : 0)
+#else
+#define QSA_GATHER_SLOT(chunk) (KV_ub_version_counter_1 & 1)
+#define QSA_GATHER_QUADS 8
+#endif
+// In the relay schedule K and V share three L1 slots. The hybrid uses two
+// private K slots after P, and the first two original slots for V.
+#ifdef QSA_K_AHEAD
+#define QSA_K_OFFSET(t) (qsa_k_l1_base + (((t) - 33) & 1) * qsa_k_tile_size)
+#define QSA_V_READ_SLOT(t) (((t) - 34) & 1)
+#define QSA_V_WRITE_SLOT(t) (((t) - 2) & 1)
+#else
+#define QSA_K_OFFSET(t) (((t) % 3) * 32768)
+#define QSA_V_READ_SLOT(t) (((t) + 2) % 3)
+#define QSA_V_WRITE_SLOT(t) (((t) + 1) % 3)
+#endif
 template <bool Prefetch, int LastFullQuad, int CoreCount, int TaskCount>
 __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int32_t* Indices, __gm__ bfloat16_t* K, __gm__ bfloat16_t* O, __gm__ bfloat16_t* Q, __gm__ bfloat16_t* V, __gm__ int32_t* Valid) {
   __cbuf__ uint8_t *buf_dyn_l1 = (__cbuf__ uint8_t *)0;
@@ -126,6 +146,10 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
     asc_sync_notify(PIPE_M, PIPE_MTE1, static_cast<event_t>(0));
     asc_sync_notify(PIPE_M, PIPE_MTE1, static_cast<event_t>(1));
     asc_sync_notify(PIPE_MTE1, PIPE_MTE2, static_cast<event_t>(0));
+#ifdef QSA_K_AHEAD
+    asc_sync_notify(PIPE_MTE1, PIPE_MTE2, static_cast<event_t>(1));
+    asc_sync_notify(PIPE_MTE1, PIPE_MTE2, static_cast<event_t>(2));
+#endif
     for (int32_t task_block = 0; task_block < tiles + 34; ++task_block) {
       if ((task_block < tiles + 33) && (33 <= task_block)) {
         asc_sync_wait(PIPE_MTE1, PIPE_MTE2, static_cast<event_t>(0));
@@ -134,16 +158,30 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
           asc_copy_gm2l1_nd2nz(((__cbuf__ bfloat16_t*)buf_dyn_l1 + 98304), (&(Q[qsa_task_for_tile<CoreCount>(task_block - 33) * 4096])), 512, static_cast<asc_load_l2_cache_mode>(4), 16, 256, 0, 0);
         }
         asc_sync_notify(PIPE_MTE2, PIPE_MTE1, static_cast<event_t>(0));
+#ifdef QSA_K_AHEAD
+        int k_tile = task_block - 33;
+        if (!QSA_K_AHEAD || k_tile == 0) {
+          qsa_load_k_tile<CoreCount>(k_tile, Indices, K, (__cbuf__ bfloat16_t*)buf_dyn_l1);
+        }
+#endif
         for (int32_t sk = 0; sk < 2; ++sk) {
           if (sk == 0) {
+#ifdef QSA_K_AHEAD
+            asc_sync_wait(PIPE_MTE2, PIPE_MTE1, static_cast<event_t>(1 + (k_tile & 1)));
+#else
             asc_sync_intra_wait(PIPE_MTE1, (((task_block + 1) & 1) + 22));
             asc_sync_intra_wait(PIPE_MTE1, (((task_block + 1) & 1) + 6));
+#endif
           }
           asc_sync_wait(PIPE_M, PIPE_MTE1, static_cast<event_t>(0));
-          asc_copy_l12l0b(((__cb__ bfloat16_t*)buf_dyn_l0b), ((__cbuf__ bfloat16_t*)buf_dyn_l1 + ((task_block % 3) * 32768)), 0, (sk * 8), 8, 8, 8, 8);
+          asc_copy_l12l0b(((__cb__ bfloat16_t*)buf_dyn_l0b), ((__cbuf__ bfloat16_t*)buf_dyn_l1 + QSA_K_OFFSET(task_block)), 0, (sk * 8), 8, 8, 8, 8);
           if (sk == 1) {
+#ifdef QSA_K_AHEAD
+            asc_sync_notify(PIPE_MTE1, PIPE_MTE2, static_cast<event_t>(1 + (k_tile & 1)));
+#else
             asc_sync_intra_arrive(PIPE_MTE1, (((task_block + 1) & 1) + 4));
             asc_sync_intra_arrive(PIPE_MTE1, (((task_block + 1) & 1) + 20));
+#endif
           }
           if (sk == 0) {
             asc_sync_wait(PIPE_MTE2, PIPE_MTE1, static_cast<event_t>(0));
@@ -160,6 +198,12 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             asc_sync_notify(PIPE_M, PIPE_FIX, static_cast<event_t>(((task_block + 1) & 1)));
           }
         }
+#if defined(QSA_K_AHEAD) && QSA_K_AHEAD
+        // Current QK is queued. Stage the next K before the previous tile's PV.
+        if (k_tile + 1 < tiles) {
+          qsa_load_k_tile<CoreCount>(k_tile + 1, Indices, K, (__cbuf__ bfloat16_t*)buf_dyn_l1);
+        }
+#endif
       }
       if (34 <= task_block) {
         for (int32_t sk_1 = 0; sk_1 < 2; ++sk_1) {
@@ -168,7 +212,13 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             asc_sync_intra_wait(PIPE_MTE1, ((task_block & 1) + 2));
           }
           asc_sync_wait(PIPE_M, PIPE_MTE1, static_cast<event_t>(1));
-          asc_copy_l12l0b_transpose(((__cb__ bfloat16_t*)buf_dyn_l0b + 16384), ((__cbuf__ bfloat16_t*)buf_dyn_l1 + (((task_block + 2) % 3) * 32768)), (sk_1 * 4), 0, 4, 16, 8, 16);
+          asc_copy_l12l0b_transpose(((__cb__ bfloat16_t*)buf_dyn_l0b + 16384), ((__cbuf__ bfloat16_t*)buf_dyn_l1 + (QSA_V_READ_SLOT(task_block) * 32768)), (sk_1 * 4), 0, 4, 16, 8, 16);
+#ifdef QSA_K_AHEAD
+          if (sk_1 == 1 && task_block - 34 + 2 < tiles) {
+            asc_sync_intra_arrive(PIPE_MTE1, 4 + (task_block & 1));
+            asc_sync_intra_arrive(PIPE_MTE1, 20 + (task_block & 1));
+          }
+#endif
           if (sk_1 == 0) {
             asc_sync_intra_wait(PIPE_MTE1, 25);
             asc_sync_intra_wait(PIPE_MTE1, 9);
@@ -199,6 +249,10 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
     asc_sync_wait(PIPE_M, PIPE_MTE1, static_cast<event_t>(0));
     asc_sync_wait(PIPE_M, PIPE_MTE1, static_cast<event_t>(1));
     asc_sync_wait(PIPE_MTE1, PIPE_MTE2, static_cast<event_t>(0));
+#ifdef QSA_K_AHEAD
+    asc_sync_wait(PIPE_MTE1, PIPE_MTE2, static_cast<event_t>(1));
+    asc_sync_wait(PIPE_MTE1, PIPE_MTE2, static_cast<event_t>(2));
+#endif
   }
   if ASC_IS_AIV {
     int32_t sid = asc_get_sub_block_id();
@@ -248,6 +302,10 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
           main_kernel_simd_vf_0(buf_dyn_shmem);
         }
         asc_sync_intra_wait(PIPE_V, ((task_block_1 + 1) & 1));
+#ifdef QSA_K_AHEAD
+        // Removing the K relay also removes the indirect Valid -> QK -> V edge.
+        asc_sync_wait(PIPE_MTE2, PIPE_V, static_cast<event_t>(2 + ((task_block_1 + 1) & 1)));
+#endif
         main_kernel_simd_vf_1(buf_dyn_shmem, task_block_1);
         asc_sync_notify(PIPE_V, PIPE_MTE3, static_cast<event_t>(3));
         asc_sync_notify(PIPE_V, PIPE_MTE2, static_cast<event_t>((((task_block_1 + 1) & 1) + 2)));
@@ -256,27 +314,36 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
         asc_sync_intra_arrive(PIPE_MTE3, 9);
       }
       if ((task_block_1 < tiles + 2) && (2 <= task_block_1)) {
+#ifdef QSA_K_AHEAD
+        // V now owns the first scalar read of the index tile.
+        asc_sync_wait(PIPE_MTE2, PIPE_S, static_cast<event_t>(task_block_1 & 1));
+#endif
+#ifdef QSA_PAIR_CHUNKS
+        for (int issue = 0; issue < 4; ++issue) {
+          int chunk = issue & 1;
+#else
         for (int32_t chunk = 0; chunk < 2; ++chunk) {
-          for (int32_t quad = 0; quad < 8; ++quad) {
+#endif
+          for (int32_t quad = 0; quad < QSA_GATHER_QUADS; ++quad) {
             int32_t base = Prefetch ? row_indices[qsa_row_slot_offset<CoreCount>(task_block_1 - 2) + sid * 64 + chunk * 32 + quad * 4]
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[((((((task_block_1 & 1) * 128) + (sid * 64)) + (chunk * 32)) + (quad * 4)) + 27008)];
             int8_t __cond_2 = ((int8_t)(bool)0);
             __cond_2 = ((int8_t)(base <= LastFullQuad));
             if (quad == 0) {
-              asc_sync_wait(PIPE_V, PIPE_MTE2, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
+              asc_sync_wait(PIPE_V, PIPE_MTE2, static_cast<event_t>(QSA_GATHER_SLOT(chunk)));
             }
             if ((bool)__cond_2) {
-              asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((((KV_ub_version_counter_1 & 1) * 8192) + (quad * 1024)) + 16896)]))), (__gm__ uint8_t*)((&(V[((base * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 4, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 1024, 512);
+              asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[(((QSA_GATHER_SLOT(chunk) * 8192) + (quad * 1024)) + 16896)]))), (__gm__ uint8_t*)((&(V[((base * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 4, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 1024, 512);
             }
             if (!((bool)__cond_2)) {
               for (int32_t i = 0; i < 4; ++i) {
                 int32_t idx = Prefetch ? row_indices[qsa_row_slot_offset<CoreCount>(task_block_1 - 2) + sid * 64 + chunk * 32 + quad * 4 + i]
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[(((((((task_block_1 & 1) * 128) + (sid * 64)) + (chunk * 32)) + (quad * 4)) + i) + 27008)];
-                asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[(((((KV_ub_version_counter_1 & 1) * 8192) + (quad * 1024)) + (i * 256)) + 16896)]))), (__gm__ uint8_t*)((&(V[((idx * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 1, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 512, 512);
+                asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((((QSA_GATHER_SLOT(chunk) * 8192) + (quad * 1024)) + (i * 256)) + 16896)]))), (__gm__ uint8_t*)((&(V[((idx * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 1, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 512, 512);
               }
             }
             if (quad == 7) {
-              asc_sync_notify(PIPE_MTE2, PIPE_V, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
+              asc_sync_notify(PIPE_MTE2, PIPE_V, static_cast<event_t>(QSA_GATHER_SLOT(chunk)));
             }
             if (!Prefetch && (chunk == 1) && (quad == 7)) {
               asc_sync_notify(PIPE_S, PIPE_MTE2, static_cast<event_t>((task_block_1 & 1)));
@@ -285,16 +352,23 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
               asc_sync_notify(PIPE_S, PIPE_MTE2, static_cast<event_t>(((task_block_1 - 2) / 17) & 1));
             }
           }
+#ifdef QSA_PAIR_CHUNKS
+          if (issue < 2) continue;
+#endif
           asc_sync_wait(PIPE_MTE3, PIPE_V, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
           asc_sync_wait(PIPE_MTE2, PIPE_V, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
           ascend_nd2nz_scatter<32, 256, 33, bfloat16_t, bfloat16_t>((__ubuf__ bfloat16_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[(((KV_ub_version_counter_1 & 1) * 8192) + 16896)]))), (__ubuf__ bfloat16_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((KV_ub_version_counter_1 & 1) * 8448)]))));
           asc_sync_notify(PIPE_V, PIPE_MTE3, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
           asc_sync_notify(PIPE_V, PIPE_MTE2, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
+#ifdef QSA_K_AHEAD
+          if (chunk == 0 && task_block_1 >= 4) {  // the first two V slots have no predecessor
+#else
           if (chunk == 0) {
+#endif
             asc_sync_intra_wait(PIPE_MTE3, ((task_block_1 & 1) + 4));
           }
           asc_sync_wait(PIPE_V, PIPE_MTE3, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
-          asc_copy_ub2l1((__cbuf__ void*)(((__cbuf__ bfloat16_t*)buf_dyn_l1 + (((((task_block_1 + 1) % 3) * 32768) + (sid * 1024)) + (chunk * 512)))), (__ubuf__ void*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((KV_ub_version_counter_1 & 1) * 8448)]))), 16, 32, 1, 96);
+          asc_copy_ub2l1((__cbuf__ void*)(((__cbuf__ bfloat16_t*)buf_dyn_l1 + (((QSA_V_WRITE_SLOT(task_block_1) * 32768) + (sid * 1024)) + (chunk * 512)))), (__ubuf__ void*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((KV_ub_version_counter_1 & 1) * 8448)]))), 16, 32, 1, 96);
           asc_sync_notify(PIPE_MTE3, PIPE_V, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
           if (chunk == 1) {
             asc_sync_intra_arrive(PIPE_MTE3, ((task_block_1 & 1) + 2));
@@ -305,8 +379,16 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
       if ((task_block_1 < tiles + 1) && (1 <= task_block_1)) {
         asc_sync_wait(PIPE_V, PIPE_MTE2, static_cast<event_t>((((task_block_1 + 1) & 1) + 2)));
         asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ int32_t*)buf_dyn_shmem)[((((task_block_1 + 1) & 1) * 128) + 27264)]))), (__gm__ uint8_t*)((&(Valid[CoreCount ? ((qsa_task_for_tile<CoreCount>(task_block_1 - 1) >> 1) * 2176 + ((task_block_1 - 1) % 17) * 128) : ((((((int32_t)block_idx) >> 1) * 2176) + (task_block_1 * 128)) - 128)]))), 1, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 512, 512);
+#ifdef QSA_K_AHEAD
+        asc_sync_notify(PIPE_MTE2, PIPE_V, static_cast<event_t>(2 + ((task_block_1 + 1) & 1)));
+#else
+#ifdef QSA_PAIR_CHUNKS
+        for (int issue = 0; issue < 4; ++issue) {
+          int chunk_1 = issue & 1;
+#else
         for (int32_t chunk_1 = 0; chunk_1 < 2; ++chunk_1) {
-          for (int32_t quad_1 = 0; quad_1 < 8; ++quad_1) {
+#endif
+          for (int32_t quad_1 = 0; quad_1 < QSA_GATHER_QUADS; ++quad_1) {
             if (!Prefetch && (chunk_1 == 0) && (quad_1 == 0)) {
               asc_sync_wait(PIPE_MTE2, PIPE_S, static_cast<event_t>(((task_block_1 + 1) & 1)));
             }
@@ -318,22 +400,25 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             int8_t __cond_1 = ((int8_t)(bool)0);
             __cond_1 = ((int8_t)(base_1 <= LastFullQuad));
             if (quad_1 == 0) {
-              asc_sync_wait(PIPE_V, PIPE_MTE2, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
+              asc_sync_wait(PIPE_V, PIPE_MTE2, static_cast<event_t>(QSA_GATHER_SLOT(chunk_1)));
             }
             if ((bool)__cond_1) {
-              asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((((KV_ub_version_counter_1 & 1) * 8192) + (quad_1 * 1024)) + 16896)]))), (__gm__ uint8_t*)((&(K[((base_1 * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 4, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 1024, 512);
+              asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[(((QSA_GATHER_SLOT(chunk_1) * 8192) + (quad_1 * 1024)) + 16896)]))), (__gm__ uint8_t*)((&(K[((base_1 * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 4, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 1024, 512);
             }
             if (!((bool)__cond_1)) {
               for (int32_t i_1 = 0; i_1 < 4; ++i_1) {
                 int32_t idx_1 = Prefetch ? row_indices[qsa_row_slot_offset<CoreCount>(task_block_1 - 1) + sid * 64 + chunk_1 * 32 + quad_1 * 4 + i_1]
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[((((((((task_block_1 + 1) & 1) * 128) + (sid * 64)) + (chunk_1 * 32)) + (quad_1 * 4)) + i_1) + 27008)];
-                asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[(((((KV_ub_version_counter_1 & 1) * 8192) + (quad_1 * 1024)) + (i_1 * 256)) + 16896)]))), (__gm__ uint8_t*)((&(K[((idx_1 * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 1, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 512, 512);
+                asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((((QSA_GATHER_SLOT(chunk_1) * 8192) + (quad_1 * 1024)) + (i_1 * 256)) + 16896)]))), (__gm__ uint8_t*)((&(K[((idx_1 * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 1, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 512, 512);
               }
             }
             if (quad_1 == 7) {
-              asc_sync_notify(PIPE_MTE2, PIPE_V, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
+              asc_sync_notify(PIPE_MTE2, PIPE_V, static_cast<event_t>(QSA_GATHER_SLOT(chunk_1)));
             }
           }
+#ifdef QSA_PAIR_CHUNKS
+          if (issue < 2) continue;
+#endif
           asc_sync_wait(PIPE_MTE3, PIPE_V, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
           asc_sync_wait(PIPE_MTE2, PIPE_V, static_cast<event_t>((KV_ub_version_counter_1 & 1)));
           ascend_nd2nz_scatter<32, 256, 33, bfloat16_t, bfloat16_t>((__ubuf__ bfloat16_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[(((KV_ub_version_counter_1 & 1) * 8192) + 16896)]))), (__ubuf__ bfloat16_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((KV_ub_version_counter_1 & 1) * 8448)]))));
@@ -347,6 +432,7 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
           }
           KV_ub_version_counter_1 = (KV_ub_version_counter_1 + 1);
         }
+#endif
       }
       if ((task_block_1 < tiles + 3) && (3 <= task_block_1)) {
         asc_sync_intra_wait(PIPE_V, 8);
@@ -382,6 +468,12 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
     }
   }
 }
+
+#undef QSA_GATHER_SLOT
+#undef QSA_GATHER_QUADS
+#undef QSA_K_OFFSET
+#undef QSA_V_READ_SLOT
+#undef QSA_V_WRITE_SLOT
 
 // MixedKernel emits unused sub-block-ID reads around the two expert calls.
 // The ID is invariant on a subcore. Allow Bisheng to elide unused reads in
