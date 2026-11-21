@@ -44,7 +44,11 @@ def main():
     parser.add_argument("--repeat", type=int, default=20)
     parser.add_argument("--dynamic", action="store_true")
     parser.add_argument("--pv-ready", action="store_true", help="enable the QSA PV synchronization diagnostic when compiling TileLang")
-    parser.add_argument("--qsa-variant", choices=("baseline", "author-cube", "author-aiv"), default="baseline")
+    parser.add_argument(
+        "--qsa-variant", choices=("baseline", "author-cube", "author-aiv", "old-schedule", "old-prefetch", "padded-aiv", "hybrid-k"),
+        default="baseline",
+    )
+    parser.add_argument("--aic-count", type=int, choices=(28, 32, 36), help="persistent mixed-core blocks for the AIV and hybrid experiments")
     parser.add_argument("--pad-m", type=int, choices=(16, 32), default=32, help="physical rows per KV head (author variants support 16)")
     parser.add_argument("--stages", type=int, help="override the author kernel's pipeline depth (default 2 for 2176 slots)")
     mode = parser.add_mutually_exclusive_group()
@@ -63,6 +67,12 @@ def main():
         parser.error("baseline requires --pad-m 32")
     if args.stages is not None and (args.qsa_variant == "baseline" or not 1 <= args.stages <= 17):
         parser.error("--stages requires an author variant and a value from 1 to 17")
+    if args.aic_count and args.qsa_variant in ("baseline", "author-cube"):
+        parser.error("--aic-count requires an AIV or hybrid variant")
+    if args.qsa_variant in ("old-schedule", "old-prefetch"):
+        if args.dynamic or args.pad_m != 16 or args.stages not in (None, 3):
+            parser.error("the explicit old schedule requires static shapes, --pad-m 16 and --stages 3")
+        args.stages = 3
     import torch_npu
 
     device = torch.device("npu", torch.npu.current_device())
@@ -143,13 +153,15 @@ def main():
         return pad_q_heads(query, args.pad_m), k, v, *split_indices(token_slots(lists, counts, queries, kv))
 
     kernel = compile_qsa(
-        total, batch * kv, 2176, dynamic_shape=args.dynamic, variant=args.qsa_variant, pad_m=args.pad_m, num_stages=args.stages
+        total, batch * kv, 2176, dynamic_shape=args.dynamic, variant=args.qsa_variant, pad_m=args.pad_m, num_stages=args.stages,
+        aic_count=args.aic_count,
     )
     tile_inputs = tl_inputs()
     print(
         f"device={torch.npu.get_device_name(device.index)} torch={torch.__version__} torch_npu={torch_npu.__version__} "
         f"tilelang={tilelang.__file__} batch={batch} q/request={queries} kv/request={kv} slots=2176 seed={args.seed} "
-        f"dynamic={args.dynamic} qsa_variant={args.qsa_variant} pad_m={args.pad_m} stages={args.stages or 2}",
+        f"dynamic={args.dynamic} qsa_variant={args.qsa_variant} pad_m={args.pad_m} stages={args.stages or 2} "
+        f"blocks={args.aic_count or 2 * total}",
         flush=True,
     )
     if args.qsa_once:

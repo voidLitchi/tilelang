@@ -126,3 +126,53 @@ bisheng -O2 -fPIC -std=c++20 -mllvm -cce-aicore-dcpreload-args=false --npu-arch=
 ```
 
 在 17-tile lowering 中观察到 InsertSync 的 V→MTE3 flag 复用界限、FIX→V 跨迭代同步环警告。上板先做精度，尤其是动态路径、多次更换输入、不同 seed 的重复测试；若不稳定或挂起，保留生成源码与错误形状，不要以该结果报性能。本次没有仿真、没有上板延时数据。
+
+## 950 上的 M=16、三阶段调度实验
+
+在本分支的同一构建、CANN 环境、设备、时钟和 profiler 下运行。下面均使用 prepared 输入。测得的 6527 µs（old）和 6877 µs（exp）是原始分支数据。下表各实验的时间、精度和事件等待时长需要上板测量。
+
+| `--qsa-variant` | 不指定核数 | 加 `--aic-count 28`（也支持 32、36） |
+|---|---|---|
+| `author-aiv` | 当前编译器调度对照 | 同一 DSL 跨逻辑任务展开一层连续流水 |
+| `old-schedule` | 显式重放 old 的 AIC/AIV 指令、缓冲地址和事件 | 同一手工流水持续处理多个任务，增加输出缓冲复用保护 |
+| `old-prefetch` | 在旧调度上每个 AIV 一次读入 2176 个 int32 索引 | 两个 8.5 KiB 索引槽轮转，下一任务可提前读入 |
+| `padded-aiv` | 利用三个 KV 尾部 padding 行，移除四行 gather 的逐块边界分支 | 同一 AIV 实现用固定核数 |
+| `hybrid-k` | K 由 AIC 直接 ND→NZ 到独立 L1，V 保留 AIV relay | 对照相同核数的 `padded-aiv`，检查转移 K 流量后的关键路径 |
+
+前两个 `old-*` 实现关闭 AutoSchedule，固定 BF16、D=256、M=16、2176 槽、3 stages 和静态形状。普通网格每个 (query, KV head) 一个 mixed block。固定网格下，第 c 个 block 负责 c、c+C、c+2C 等任务。每任务 17 个 tile，缓冲下标和事件按连续 tile 编号轮转。Q 重载、softmax 状态初始化和最终 O 写出按任务发生。旧调度在无核数参数时保留为控制组。单次 kernel launch 中的逻辑 block 数与主机 launch 次数分别统计。
+
+**先验证精度。** 在 28 AIC 的 PR 上，下面的多 batch 用例有 60 个逻辑任务，覆盖第三轮复用以及跨请求的不足四行尾块。大规格全行 FP32 校验耗时较长，可与性能采集分别运行。
+
+```bash
+qsa() { python3 -m examples.ascend.qsa.compare_gbsa --scope prepared --pad-m 16 --stages 3 "$@"; }
+shape=(--batch 1 --queries 4096 --kv 32768 --seed 7)
+for v in author-aiv old-schedule old-prefetch padded-aiv hybrid-k; do
+  qsa --batch 2 --queries 15 --kv 2057 --qsa-variant "$v" --aic-count 28 --check --check-rows 0
+  qsa "${shape[@]}" --qsa-variant "$v" --aic-count 28 --check --check-rows 0
+done
+qsa "${shape[@]}" --qsa-variant old-schedule --check --check-rows 0
+qsa "${shape[@]}" --qsa-variant old-prefetch --check --check-rows 0
+```
+
+**性能归因。** 以下第一组固定新分支，单独切换机器码调度。第二组在同一旧调度上交叉切换核数和索引路径。第三组比较两种搬运通道。建议倒序复测并记录每轮 GBSA 行作环境对照。更换设备时用对应的 AIC 数。
+
+```bash
+timed() { qsa "${shape[@]}" --repeat 50 --no-check "$@"; }
+for v in author-aiv old-schedule old-schedule author-aiv; do timed --qsa-variant "$v"; done
+for v in old-schedule old-prefetch; do
+  timed --qsa-variant "$v"
+  timed --qsa-variant "$v" --aic-count 28
+done
+for v in author-aiv padded-aiv hybrid-k; do timed --qsa-variant "$v" --aic-count 28; done
+
+# 在采集工具中以此作为应用命令。每次只发射一次 QSA，无 GBSA 和 do_bench。
+qsa "${shape[@]}" --qsa-variant old-prefetch --aic-count 28 --qsa-once
+```
+
+**读流水时的判据。** 对同一物理 AIV 统计同类空泡间的 K/V 四行 DMA 数。每 8 笔为一个 32 行 chunk，每 32 笔为一个 K+V tile，每 544 笔为一个逻辑任务。在 old-schedule 中，MTE3→V 保护 NZ 槽，V→MTE2 保护 ND 槽，MTE3 还可能等待 AIC 释放 L1。索引另有 MTE2→S 就绪和 S→MTE2 复用边。分别采集 AIV MTE2 的有效字节、忙时占比与绝对忙时，scalar 的事件等待与发射间隔、MTE3 的 L1 等待，以及 AIC MTE2、MTE1 和 QK 的起点。若固定核数只消除任务间空泡，tile 内重复的等待应仍可见。若整行预取消除对应的 scalar 等待而 MTE2 空泡不变，继续看 ND/NZ 槽复用和 L1 归还。对于 hybrid-k 同时看 AIC 每 32 个短 DMA 后 QK 等待多久。
+
+在本地 dav-3510 离线编译环境（CANN 9.2.0-beta.2 和 9.2 版开发头文件）中，上述大规格的 `old-schedule` 普通网格和 qsa-old 同一工具链编出的 ELF `.text` 均为 6256 字节，SHA-256 为 `522fd6ce6db05be7ea0c9308beb3e3d6a117106aeafda4bbc3c210c8dbb3161a`。服务器的 CANN 编译器和选项会影响指令编码。原 old lowering 对 V→MTE3 事件复用发出过警告，显式重放继承其事件协议。尤其是多任务版本，须先检查多轮复用的数值再采用其耗时。
+
+这组 M16/stages3 对照中，old/exp 每个 AIV 每逻辑任务均发出 578 次 GM→UB，包括 544 次 K/V、17 次 Indices 和 17 次 Valid。exp 的 AIV1 在 softmax 读 S 后向 FIX 归还槽位，展开后每任务增加 19 次通知及 19 次对应的 AIC 等待（含首尾）。静态计数不能换算出 350 µs。固定索引预取把普通网格中的 17 次 Indices DMA 合为一次，字节数不变。按板上 6527 µs 和 86% 的忙时占比，在工作量、忙时和其他通道均不变的假设下，完全填补空泡的时间下限约为 5613 µs。
+
+`hybrid-k` 每个 tile 的 32 笔 K 搬运均为 4×256 BF16 的 GM→L1 ND→NZ，写入 NZ 目标的行跨度为 128。每个逻辑任务约一半 K/V 请求转移到 AIC。该实验使用 scalar 从 GM 读 quad 基址，生成代码中本 tile 的 QK 仍需等 32 笔 K 搬完。GBSA 在 `ops-transformer@6945d02b7` 的 Arch35 regular 路径为 QK、PV 打开稀疏偏移预计算；QK 预热描述符 cache line，根据记录设置实际 nValue、ndNum 和矩阵步长，PV 分组加载 V。若 hybrid 的 AIV 等待缩短而 AIC 转为瓶颈，可优先试描述符预取、成对发射和下一 tile 的 K 提前装载。两路 DMA 共享下层存储带宽，实际收益取决于短 DMA 的发射效率、缓存命中和跨 tile 重叠。

@@ -106,6 +106,9 @@ def qsa_fwd(
     cube_gather=True,
     chunk_rows=None,
     pad_m=None,
+    aic_count=None,
+    padded_gather=False,
+    direct_k=False,
 ):
     """Build the QSA forward kernel. total_q / total_kv are num_tokens and
     kv_length; dynamic_shape=True makes them symbolic dimensions.
@@ -126,6 +129,10 @@ def qsa_fwd(
     the kernel body would evaluate to a bool and crash on `.items()`."""
     if top_k <= 0 or top_k % BLOCK_I:
         raise ValueError(f"top_k must be a positive multiple of {BLOCK_I}")
+    if aic_count is not None and aic_count not in (28, 32, 36):
+        raise ValueError("aic_count must be 28, 32 or 36")
+    if direct_k and cube_gather:
+        raise ValueError("direct_k uses the AIV gather for V")
     MP = PAD_M if pad_m is None else pad_m
     padded_kv = total_kv + KV_PAD_ROWS
     if dynamic_shape:
@@ -156,6 +163,7 @@ def qsa_fwd(
             )
         CHUNK_ROWS = chunk_rows
     total_tasks = total_q * NUM_KV_HEADS
+    grid = total_tasks if aic_count is None else aic_count
     # `for x in range(n)` inside a prim_func builds a TIR loop whose
     # induction variable is a Var, which cannot index a Python list. The
     # builder's ctx_for natively expands any other Python iterable at
@@ -228,6 +236,15 @@ def qsa_fwd(
             T.copy(KV[base : base + 4, qk_head, :], KV_l1[r : r + 4, :])
 
     @T.macro
+    def gather_k_direct(grp, head, b, indices, key, key_l1):
+        for quad in T.serial(BI // 4):
+            row = quad * 4
+            base = indices[grp, b + row]
+            T.assume(base >= 0)
+            T.assume(base < total_kv)
+            T.copy(key[base : base + 4, head, :], key_l1[row : row + 4, :])
+
+    @T.macro
     def gather_kv_aiv(qk_head, sid, KV, indices_ub, KV_ub, KV_nz_ub, KV_l1):
         # Legacy relay (original qsa.py): AIV pulls each quad with a 4-row
         # gm2ub burst, rescatters to NZ in the UB, then ub2l1. Kept as the
@@ -239,7 +256,7 @@ def qsa_fwd(
                 base = T.int32(indices_ub[sid * ROWS_PER_AIV + r])
                 T.assume(base >= 0)
                 T.assume(base < total_kv)
-                if base + 4 <= total_kv:
+                if padded_gather or base + 4 <= total_kv:
                     _copy_kv_rows(
                         T.access_ptr(KV_ub[4 * quad, 0], "w"),
                         T.access_ptr(KV[base, qk_head, 0], "r"),
@@ -341,12 +358,12 @@ def qsa_fwd(
         Valid: T.Buffer((total_q, top_k), "int32"),
         O: T.Buffer((total_q, NUM_KV_HEADS, MP, D), dtype),
     ):
-        with T.MixedKernel(total_tasks) as (tid, sid):
-            grp = tid // NUM_KV_HEADS
-            g = tid % NUM_KV_HEADS
+        with T.MixedKernel(grid) as (tid, sid):
 
             Q_l1 = T.alloc_l1((MP, D), dtype)
             KV_l1 = T.alloc_l1((BI, D), dtype)
+            if direct_k:
+                K_l1 = T.alloc_l1((BI, D), dtype)
             P_l1 = T.alloc_l1((MP, BI), dtype)
             qk_l0c = T.alloc_l0c((MP, BI), accum_dtype)
             pv_l0c = T.alloc_l0c((MP, D), accum_dtype)
@@ -373,7 +390,7 @@ def qsa_fwd(
             T.annotate_layout(layouts)
             T.annotate_buffer_versions(
                 {
-                    KV_l1: versions["KV_l1"],
+                    KV_l1: 2 if direct_k else versions["KV_l1"],
                     P_l1: versions["P_l1"],
                     qk_l0c: versions["qk_l0c"],
                     pv_l0c: versions["pv_l0c"],
@@ -384,6 +401,8 @@ def qsa_fwd(
                     O_tmp_ub: versions["O_tmp_ub"],
                 }
             )
+            if direct_k:
+                T.annotate_buffer_versions({K_l1: 2})
             # m/l are always touched now (always-merge reads them at
             # iteration 0 too); version 1 is fine for the in-order V-pipe
             # state chain at any NI.
@@ -398,12 +417,20 @@ def qsa_fwd(
                 )
 
             for task_block in T.Pipelined(
-                NI,
+                NI if aic_count is None else NI * T.ceildiv(total_tasks - tid, aic_count),
                 num_stages=stages,
                 annotations={"enable_offset": True},
             ):
-                b = task_block * BI
-                if task_block == 0:
+                if aic_count is None:
+                    tile = task_block
+                    logical_task = tid
+                else:
+                    tile = task_block % NI
+                    logical_task = tid + (task_block // NI) * aic_count
+                grp = logical_task // NUM_KV_HEADS
+                g = logical_task % NUM_KV_HEADS
+                b = tile * BI
+                if tile == 0:
                     T.copy(Q[grp, g, :, :], Q_l1, l2_cache_ctrl=4)
                     with T.SimdVF():
                         full = S.pset(32, "PAT_ALL")
@@ -432,8 +459,14 @@ def qsa_fwd(
                     gather_kv(g, bases, K, KV_l1)
                 else:
                     T.copy(Indices[grp, b : b + BI], idx_ub)
-                    gather_kv_aiv(g, sid, K, idx_ub, KV_ub, KV_nz_ub, KV_l1)
-                T.gemm(Q_l1, KV_l1, qk_l0c, transpose_B=True, clear_accum=True)
+                    if direct_k:
+                        gather_k_direct(grp, g, b, Indices, K, K_l1)
+                    else:
+                        gather_kv_aiv(g, sid, K, idx_ub, KV_ub, KV_nz_ub, KV_l1)
+                if direct_k:
+                    T.gemm(Q_l1, K_l1, qk_l0c, transpose_B=True, clear_accum=True)
+                else:
+                    T.gemm(Q_l1, KV_l1, qk_l0c, transpose_B=True, clear_accum=True)
                 T.dual_copy(qk_l0c, S_ub)
                 if cube_gather:
                     gather_kv(g, bases, V, KV_l1)
@@ -461,7 +494,7 @@ def qsa_fwd(
                             S.vsts(
                                 O_ub[r, c], S.vadd(S.vmul(o, a, full), t, full), full, "NORM_B32"
                             )
-                if task_block == NI - 1:
+                if tile == NI - 1:
                     with T.SimdVF():
                         # Guard l == 0 (fully invalid query) to 1 to avoid
                         # NaN, then cache 1/l.
