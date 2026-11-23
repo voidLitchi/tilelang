@@ -49,3 +49,39 @@ python -m pytest examples/ascend/qsa/test_qsa.py -q
 ```
 
 `--num-tokens N --kv-length M --top-k K` benchmarks a single custom shape.
+
+## Dynamic-shape acceptance
+
+The baseline kernel makes `num_tokens` and `kv_length` symbolic. `top_k`, head
+counts, head dimension, and the padded Q layout remain compile-time properties.
+The runtime shape is a packed query row count and a packed KV row count, so it
+can represent one request or several requests laid out in contiguous tensors.
+
+The default `run.py --dynamic` command covers three acceptance shapes. These
+are test points, not a three-shape whitelist. To compile once and invoke that
+same kernel with all three shapes, run:
+
+```bash
+PYTHONPATH="$PWD" python examples/ascend/qsa/test_dynamic_reuse.py \
+  --shapes 16:2048,128:65536,4096:32768 --check-rows 8
+```
+
+The script prints `compiled_once=True`, then runs the same kernel object for
+each shape. Add `--check-rows 0` for an all-row FP32 reference check. Use
+`--no-check` when only the dynamic launch contract is being tested.
+
+The explicit `old-schedule` path is the current performance path. Its task
+count and KV boundary are C++ template parameters, so it remains a static
+kernel and rejects `--dynamic`. Dynamic acceptance and peak-performance
+benchmarking therefore use separate kernel variants.
+
+The first tail-specialized experiment is exposed as `old-schedule-tail`.
+It keeps the static task schedule and reads the already loaded `Valid` tile
+only on local tile 16. Fully invalid quads are skipped, and a partial final
+quad falls back to per-row copies. Compare it with the current baseline using:
+
+```bash
+python -m examples.ascend.qsa.compare_gbsa \
+  --qsa-variant old-schedule-tail --aic-count 28 \
+  --batch 1 --queries 4096 --kv 32768 --no-check --scope prepared
+```

@@ -329,16 +329,37 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[((((((task_block_1 & 1) * 128) + (sid * 64)) + (chunk * 32)) + (quad * 4)) + 27008)];
             int8_t __cond_2 = ((int8_t)(bool)0);
             __cond_2 = ((int8_t)(base <= LastFullQuad));
+            bool skip_invalid = false;
+#ifdef QSA_SKIP_TAIL
+            // Valid for this tile was loaded into the matching parity slot
+            // before this gather. Do not add another GM transaction here.
+            skip_invalid = (((task_block_1 - 2) % 17) == 16);
+#endif
+            int32_t valid_quad = 1;
+#ifdef QSA_SKIP_TAIL
+            if (skip_invalid) {
+              for (int32_t i = 0; i < 4; ++i) {
+                valid_quad &= ((__ubuf__ int32_t*)buf_dyn_shmem)[((((((task_block_1 & 1) * 128) + (sid * 64)) + (chunk * 32)) + (quad * 4) + i) + 27264)];
+              }
+            }
+#endif
             if (quad == 0) {
               asc_sync_wait(PIPE_V, PIPE_MTE2, static_cast<event_t>(QSA_GATHER_SLOT(chunk)));
             }
-            if ((bool)__cond_2) {
+            if ((bool)__cond_2 && (!skip_invalid || valid_quad != 0)) {
               asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[(((QSA_GATHER_SLOT(chunk) * 8192) + (quad * 1024)) + 16896)]))), (__gm__ uint8_t*)((&(V[((base * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 4, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 1024, 512);
             }
-            if (!((bool)__cond_2)) {
+            if (!((bool)__cond_2) || (skip_invalid && valid_quad == 0)) {
               for (int32_t i = 0; i < 4; ++i) {
                 int32_t idx = Prefetch ? row_indices[qsa_row_slot_offset<CoreCount>(task_block_1 - 2) + sid * 64 + chunk * 32 + quad * 4 + i]
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[(((((((task_block_1 & 1) * 128) + (sid * 64)) + (chunk * 32)) + (quad * 4)) + i) + 27008)];
+                int32_t valid_row = 1;
+#ifdef QSA_SKIP_TAIL
+                if (skip_invalid) {
+                  valid_row = ((__ubuf__ int32_t*)buf_dyn_shmem)[((((((task_block_1 & 1) * 128) + (sid * 64)) + (chunk * 32)) + (quad * 4) + i) + 27264)];
+                }
+                if (valid_row == 0) continue;
+#endif
                 asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((((QSA_GATHER_SLOT(chunk) * 8192) + (quad * 1024)) + (i * 256)) + 16896)]))), (__gm__ uint8_t*)((&(V[((idx * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 1, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 512, 512);
               }
             }
@@ -399,16 +420,35 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[(((((((task_block_1 + 1) & 1) * 128) + (sid * 64)) + (chunk_1 * 32)) + (quad_1 * 4)) + 27008)];
             int8_t __cond_1 = ((int8_t)(bool)0);
             __cond_1 = ((int8_t)(base_1 <= LastFullQuad));
+            bool skip_invalid_1 = false;
+#ifdef QSA_SKIP_TAIL
+            skip_invalid_1 = (((task_block_1 - 1) % 17) == 16);
+#endif
+            int32_t valid_quad_1 = 1;
+#ifdef QSA_SKIP_TAIL
+            if (skip_invalid_1) {
+              for (int32_t i_1 = 0; i_1 < 4; ++i_1) {
+                valid_quad_1 &= ((__ubuf__ int32_t*)buf_dyn_shmem)[(((((((task_block_1 + 1) & 1) * 128) + (sid * 64)) + (chunk_1 * 32)) + (quad_1 * 4) + i_1) + 27264)];
+              }
+            }
+#endif
             if (quad_1 == 0) {
               asc_sync_wait(PIPE_V, PIPE_MTE2, static_cast<event_t>(QSA_GATHER_SLOT(chunk_1)));
             }
-            if ((bool)__cond_1) {
+            if ((bool)__cond_1 && (!skip_invalid_1 || valid_quad_1 != 0)) {
               asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[(((QSA_GATHER_SLOT(chunk_1) * 8192) + (quad_1 * 1024)) + 16896)]))), (__gm__ uint8_t*)((&(K[((base_1 * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 4, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 1024, 512);
             }
-            if (!((bool)__cond_1)) {
+            if (!((bool)__cond_1) || (skip_invalid_1 && valid_quad_1 == 0)) {
               for (int32_t i_1 = 0; i_1 < 4; ++i_1) {
                 int32_t idx_1 = Prefetch ? row_indices[qsa_row_slot_offset<CoreCount>(task_block_1 - 1) + sid * 64 + chunk_1 * 32 + quad_1 * 4 + i_1]
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[((((((((task_block_1 + 1) & 1) * 128) + (sid * 64)) + (chunk_1 * 32)) + (quad_1 * 4)) + i_1) + 27008)];
+                int32_t valid_row_1 = 1;
+#ifdef QSA_SKIP_TAIL
+                if (skip_invalid_1) {
+                  valid_row_1 = ((__ubuf__ int32_t*)buf_dyn_shmem)[(((((((task_block_1 + 1) & 1) * 128) + (sid * 64)) + (chunk_1 * 32)) + (quad_1 * 4) + i_1) + 27264)];
+                }
+                if (valid_row_1 == 0) continue;
+#endif
                 asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ bfloat16_t*)buf_dyn_shmem)[((((QSA_GATHER_SLOT(chunk_1) * 8192) + (quad_1 * 1024)) + (i_1 * 256)) + 16896)]))), (__gm__ uint8_t*)((&(K[((idx_1 * 512) + ((((int32_t)block_idx) & 1) * 256))]))), 1, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 512, 512);
               }
             }
@@ -471,6 +511,7 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
 
 #undef QSA_GATHER_SLOT
 #undef QSA_GATHER_QUADS
+#undef QSA_SKIP_TAIL
 #undef QSA_K_OFFSET
 #undef QSA_V_READ_SLOT
 #undef QSA_V_WRITE_SLOT

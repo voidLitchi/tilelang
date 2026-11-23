@@ -47,7 +47,7 @@ def main():
     parser.add_argument(
         "--qsa-variant",
         choices=(
-            "baseline", "author-cube", "author-aiv", "old-schedule", "old-prefetch", "old-chunk-ahead",
+            "baseline", "author-cube", "author-aiv", "old-schedule", "old-schedule-tail", "old-prefetch", "old-chunk-ahead",
             "old-hybrid-k", "old-hybrid-k-ahead", "padded-aiv", "hybrid-k",
         ),
         default="baseline",

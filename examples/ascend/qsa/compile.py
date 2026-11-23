@@ -17,7 +17,14 @@ def compile_qsa(
         if num_stages is not None:
             raise ValueError("The --stages override requires an author QSA variant")
         program = qsa_fwd(num_tokens, kv_length, top_k, dynamic_shape=dynamic_shape)
-    elif variant in ("old-schedule", "old-prefetch", "old-chunk-ahead", "old-hybrid-k", "old-hybrid-k-ahead"):
+    elif variant in (
+        "old-schedule",
+        "old-schedule-tail",
+        "old-prefetch",
+        "old-chunk-ahead",
+        "old-hybrid-k",
+        "old-hybrid-k-ahead",
+    ):
         from examples.ascend.qsa.kernel_old_schedule import qsa_old_schedule
 
         if dynamic_shape or pad_m != 16 or top_k != 2176 or num_stages not in (None, 3):
@@ -26,6 +33,7 @@ def compile_qsa(
             num_tokens, kv_length, prefetch=variant == "old-prefetch", aic_count=aic_count,
             direct_k=variant in ("old-hybrid-k", "old-hybrid-k-ahead"),
             lookahead_k=variant == "old-hybrid-k-ahead", pair_chunks=variant == "old-chunk-ahead",
+            skip_tail=variant == "old-schedule-tail",
         )
         configs[tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE] = False
     elif variant in ("author-cube", "author-aiv", "padded-aiv", "hybrid-k"):
