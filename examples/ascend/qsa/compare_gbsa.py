@@ -56,8 +56,18 @@ def main():
         "--aic-count", type=int, choices=(0, 28, 32, 36),
         help="AIV/hybrid grid: default 28 persistent blocks; 0 uses one block per logical task",
     )
-    parser.add_argument("--pad-m", type=int, choices=(16, 32), default=32, help="physical rows per KV head (author variants support 16)")
-    parser.add_argument("--stages", type=int, help="override the author kernel's pipeline depth (default 2 for 2176 slots)")
+    parser.add_argument(
+        "--pad-m",
+        type=int,
+        choices=(16, 32),
+        default=None,
+        help="physical rows per KV head (defaults to 16 for old schedules and 32 otherwise)",
+    )
+    parser.add_argument(
+        "--stages",
+        type=int,
+        help="override the author kernel's pipeline depth (old schedules default to 3, other author variants to their kernel default)",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--qsa-once", action="store_true", help="launch one prepared QSA kernel, synchronize and exit (no GBSA, check or benchmark)"
@@ -67,6 +77,9 @@ def main():
     batch, queries, kv = args.batch, args.queries, args.kv
     if min(batch, queries, args.repeat) < 1 or kv < queries or args.check_rows < 0 or batch * kv >= 2**31:
         parser.error("require batch, queries, repeat > 0; kv >= queries; check-rows >= 0; batch*kv < 2^31")
+
+    if args.pad_m is None:
+        args.pad_m = 16 if args.qsa_variant.startswith("old-") else 32
 
     if args.pv_ready and args.qsa_variant != "baseline":
         parser.error("--pv-ready only recognizes the baseline QSA schedule")

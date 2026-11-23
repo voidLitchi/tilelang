@@ -410,6 +410,13 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
       if ((task_block_1 < tiles + 1) && (1 <= task_block_1)) {
         asc_sync_wait(PIPE_V, PIPE_MTE2, static_cast<event_t>((((task_block_1 + 1) & 1) + 2)));
         asc_copy_gm2ub_align((__ubuf__ uint8_t*)((&(((__ubuf__ int32_t*)buf_dyn_shmem)[((((task_block_1 + 1) & 1) * 128) + 27264)]))), (__gm__ uint8_t*)((&(Valid[CoreCount ? ((qsa_task_for_tile<CoreCount>(task_block_1 - 1) >> 1) * 2176 + ((task_block_1 - 1) % 17) * 128) : ((((((int32_t)block_idx) >> 1) * 2176) + (task_block_1 * 128)) - 128)]))), 1, 512, 0, 0, 0, static_cast<asc_load_l2_cache_mode>(0), 512, 512);
+#ifdef QSA_SKIP_TAIL
+        // The Valid copy is asynchronous. Tail gather reads this tile from UB
+        // with scalar loads, so establish MTE2 -> S completion explicitly.
+        if ((task_block_1 - 1) % 17 == 16) {
+          asc_sync_notify(PIPE_MTE2, PIPE_S, static_cast<event_t>(2 + ((task_block_1 + 1) & 1)));
+        }
+#endif
 #ifdef QSA_K_AHEAD
         asc_sync_notify(PIPE_MTE2, PIPE_V, static_cast<event_t>(2 + ((task_block_1 + 1) & 1)));
 #else
@@ -423,6 +430,11 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             if (!Prefetch && (chunk_1 == 0) && (quad_1 == 0)) {
               asc_sync_wait(PIPE_MTE2, PIPE_S, static_cast<event_t>(((task_block_1 + 1) & 1)));
             }
+#ifdef QSA_SKIP_TAIL
+            if (chunk_1 == 0 && quad_1 == 0 && (task_block_1 - 1) % 17 == 16) {
+              asc_sync_wait(PIPE_MTE2, PIPE_S, static_cast<event_t>(2 + ((task_block_1 + 1) & 1)));
+            }
+#endif
             if (Prefetch && CoreCount && chunk_1 == 0 && quad_1 == 0 && (task_block_1 - 1) % 17 == 0) {
               asc_sync_wait(PIPE_MTE2, PIPE_S, static_cast<event_t>(((task_block_1 - 1) / 17) & 1));
             }

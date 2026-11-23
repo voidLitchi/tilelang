@@ -93,6 +93,8 @@ PYTHONPATH="$PWD" python examples/ascend/qsa/test_dynamic_reuse.py \
 
 The dynamic old schedule requires `--aic-count 28`, `32`, or `36` through the
 Python API. The comparison script selects 28 by default for old variants.
+It also selects `pad-m=16` and `stages=3` for old variants, so those two flags
+are optional unless an explicit incompatible value is being diagnosed.
 
 For a single Qwen-size dynamic invocation, use:
 
