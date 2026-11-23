@@ -70,11 +70,6 @@ The script prints `compiled_once=True`, then runs the same kernel object for
 each shape. Add `--check-rows 0` for an all-row FP32 reference check. Use
 `--no-check` when only the dynamic launch contract is being tested.
 
-The explicit `old-schedule` path is the current performance path. Its task
-count and KV boundary are C++ template parameters, so it remains a static
-kernel and rejects `--dynamic`. Dynamic acceptance and peak-performance
-benchmarking therefore use separate kernel variants.
-
 The first tail-specialized experiment is exposed as `old-schedule-tail`.
 It keeps the static task schedule and reads the already loaded `Valid` tile
 only on local tile 16. Fully invalid quads are skipped, and a partial final
@@ -84,4 +79,26 @@ quad falls back to per-row copies. Compare it with the current baseline using:
 python -m examples.ascend.qsa.compare_gbsa \
   --qsa-variant old-schedule-tail --aic-count 28 \
   --batch 1 --queries 4096 --kv 32768 --no-check --scope prepared
+```
+
+The tail-specialized schedule also supports dynamic `num_tokens` and
+`kv_length` when a fixed persistent block count is supplied. Use the reuse
+test to compile it once and run several shapes:
+
+```bash
+PYTHONPATH="$PWD" python examples/ascend/qsa/test_dynamic_reuse.py \
+  --variant old-schedule-tail \
+  --shapes 16:2048,128:65536,4096:32768 --check-rows 8
+```
+
+The dynamic old schedule requires `--aic-count 28`, `32`, or `36` through the
+Python API. The comparison script selects 28 by default for old variants.
+
+For a single Qwen-size dynamic invocation, use:
+
+```bash
+python -m examples.ascend.qsa.compare_gbsa \
+  --dynamic --qsa-variant old-schedule-tail --aic-count 28 \
+  --batch 1 --queries 4096 --kv 32768 --check --check-rows 0 \
+  --scope prepared --repeat 20
 ```

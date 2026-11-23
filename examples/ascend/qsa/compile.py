@@ -27,13 +27,16 @@ def compile_qsa(
     ):
         from examples.ascend.qsa.kernel_old_schedule import qsa_old_schedule
 
-        if dynamic_shape or pad_m != 16 or top_k != 2176 or num_stages not in (None, 3):
-            raise ValueError("The explicit old schedule requires static shapes, pad_m=16, 2176 slots and 3 stages")
+        if dynamic_shape and variant not in ("old-schedule", "old-schedule-tail"):
+            raise ValueError("Only old-schedule and old-schedule-tail support dynamic shapes")
+        if pad_m != 16 or top_k != 2176 or num_stages not in (None, 3):
+            raise ValueError("The explicit old schedule requires pad_m=16, 2176 slots and 3 stages")
         program = qsa_old_schedule(
             num_tokens, kv_length, prefetch=variant == "old-prefetch", aic_count=aic_count,
             direct_k=variant in ("old-hybrid-k", "old-hybrid-k-ahead"),
             lookahead_k=variant == "old-hybrid-k-ahead", pair_chunks=variant == "old-chunk-ahead",
             skip_tail=variant == "old-schedule-tail",
+            dynamic_shape=dynamic_shape,
         )
         configs[tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE] = False
     elif variant in ("author-cube", "author-aiv", "padded-aiv", "hybrid-k"):

@@ -80,8 +80,10 @@ def main():
     if args.aic_count and args.qsa_variant in ("baseline", "author-cube"):
         parser.error("--aic-count requires an AIV or hybrid variant")
     if args.qsa_variant.startswith("old-"):
-        if args.dynamic or args.pad_m != 16 or args.stages not in (None, 3):
-            parser.error("the explicit old schedule requires static shapes, --pad-m 16 and --stages 3")
+        if args.dynamic and args.qsa_variant not in ("old-schedule", "old-schedule-tail"):
+            parser.error("only old-schedule and old-schedule-tail support --dynamic")
+        if args.pad_m != 16 or args.stages not in (None, 3):
+            parser.error("the explicit old schedule requires --pad-m 16 and --stages 3")
         args.stages = 3
     import torch_npu
 

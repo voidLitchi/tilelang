@@ -131,15 +131,25 @@ __aicore__ inline int qsa_row_slot_offset(int tile) {
 #define QSA_V_WRITE_SLOT(t) (((t) + 1) % 3)
 #endif
 template <bool Prefetch, int LastFullQuad, int CoreCount, int TaskCount>
-__aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int32_t* Indices, __gm__ bfloat16_t* K, __gm__ bfloat16_t* O, __gm__ bfloat16_t* Q, __gm__ bfloat16_t* V, __gm__ int32_t* Valid) {
+__aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int32_t* Indices, __gm__ bfloat16_t* K, __gm__ bfloat16_t* O, __gm__ bfloat16_t* Q, __gm__ bfloat16_t* V, __gm__ int32_t* Valid, int runtime_last_full_quad, int runtime_task_count) {
   __cbuf__ uint8_t *buf_dyn_l1 = (__cbuf__ uint8_t *)0;
   __cc__ uint8_t *buf_dyn_l0c = (__cc__ uint8_t *)0;
   __cb__ uint8_t *buf_dyn_l0b = (__cb__ uint8_t *)0;
   __ca__ uint8_t *buf_dyn_l0a = (__ca__ uint8_t *)0;
+  // Dynamic callers pass the packed task count and KV boundary. Static
+  // callers use the template constants, which the compiler can fold away.
+  int last_full_quad = LastFullQuad;
+  int task_count = TaskCount;
+  if constexpr (LastFullQuad < 0) {
+    last_full_quad = runtime_last_full_quad;
+  }
+  if constexpr (TaskCount < 0) {
+    task_count = runtime_task_count;
+  }
   int tiles = 17;
   if constexpr (CoreCount != 0) {
-    if ((int)block_idx >= TaskCount) return;
-    tiles *= (TaskCount - 1 - (int)block_idx) / CoreCount + 1;
+    if ((int)block_idx >= task_count) return;
+    tiles *= (task_count - 1 - (int)block_idx) / CoreCount + 1;
   }
   int32_t KV_ub_version_counter_1 = 0;
   if ASC_IS_AIC {
@@ -328,7 +338,7 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             int32_t base = Prefetch ? row_indices[qsa_row_slot_offset<CoreCount>(task_block_1 - 2) + sid * 64 + chunk * 32 + quad * 4]
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[((((((task_block_1 & 1) * 128) + (sid * 64)) + (chunk * 32)) + (quad * 4)) + 27008)];
             int8_t __cond_2 = ((int8_t)(bool)0);
-            __cond_2 = ((int8_t)(base <= LastFullQuad));
+            __cond_2 = ((int8_t)(base <= last_full_quad));
             bool skip_invalid = false;
 #ifdef QSA_SKIP_TAIL
             // Valid for this tile was loaded into the matching parity slot
@@ -419,7 +429,7 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             int32_t base_1 = Prefetch ? row_indices[qsa_row_slot_offset<CoreCount>(task_block_1 - 1) + sid * 64 + chunk_1 * 32 + quad_1 * 4]
                   : ((__ubuf__ int32_t*)buf_dyn_shmem)[(((((((task_block_1 + 1) & 1) * 128) + (sid * 64)) + (chunk_1 * 32)) + (quad_1 * 4)) + 27008)];
             int8_t __cond_1 = ((int8_t)(bool)0);
-            __cond_1 = ((int8_t)(base_1 <= LastFullQuad));
+            __cond_1 = ((int8_t)(base_1 <= last_full_quad));
             bool skip_invalid_1 = false;
 #ifdef QSA_SKIP_TAIL
             skip_invalid_1 = (((task_block_1 - 1) % 17) == 16);
