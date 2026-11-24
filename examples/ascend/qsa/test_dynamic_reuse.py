@@ -53,7 +53,7 @@ def main():
         help="comma-separated packed query/KV lengths, for example 16:2048,128:65536,4096:32768",
     )
     parser.add_argument("--top-k", type=int, default=2176)
-    parser.add_argument("--variant", choices=("baseline", "old-schedule-tail"), default="baseline")
+    parser.add_argument("--variant", choices=("baseline", "old-schedule-tail", "old-schedule-tail-late"), default="baseline")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--check-rows", type=int, default=8, help="0 checks every row")
     parser.add_argument("--check", action=argparse.BooleanOptionalAction, default=True)

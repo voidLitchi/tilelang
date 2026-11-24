@@ -20,6 +20,7 @@ def compile_qsa(
     elif variant in (
         "old-schedule",
         "old-schedule-tail",
+        "old-schedule-tail-late",
         "old-prefetch",
         "old-chunk-ahead",
         "old-hybrid-k",
@@ -27,7 +28,7 @@ def compile_qsa(
     ):
         from examples.ascend.qsa.kernel_old_schedule import qsa_old_schedule
 
-        if dynamic_shape and variant not in ("old-schedule", "old-schedule-tail"):
+        if dynamic_shape and variant not in ("old-schedule", "old-schedule-tail", "old-schedule-tail-late"):
             raise ValueError("Only old-schedule and old-schedule-tail support dynamic shapes")
         if pad_m != 16 or top_k != 2176 or num_stages not in (None, 3):
             raise ValueError("The explicit old schedule requires pad_m=16, 2176 slots and 3 stages")
@@ -35,7 +36,8 @@ def compile_qsa(
             num_tokens, kv_length, prefetch=variant == "old-prefetch", aic_count=aic_count,
             direct_k=variant in ("old-hybrid-k", "old-hybrid-k-ahead"),
             lookahead_k=variant == "old-hybrid-k-ahead", pair_chunks=variant == "old-chunk-ahead",
-            skip_tail=variant == "old-schedule-tail",
+            skip_tail=variant in ("old-schedule-tail", "old-schedule-tail-late"),
+            tail_sync_late=variant == "old-schedule-tail-late",
             dynamic_shape=dynamic_shape,
         )
         configs[tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE] = False

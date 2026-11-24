@@ -47,7 +47,7 @@ def main():
     parser.add_argument(
         "--qsa-variant",
         choices=(
-            "baseline", "author-cube", "author-aiv", "old-schedule", "old-schedule-tail", "old-prefetch", "old-chunk-ahead",
+            "baseline", "author-cube", "author-aiv", "old-schedule", "old-schedule-tail", "old-schedule-tail-late", "old-prefetch", "old-chunk-ahead",
             "old-hybrid-k", "old-hybrid-k-ahead", "padded-aiv", "hybrid-k",
         ),
         default="baseline",
@@ -93,7 +93,7 @@ def main():
     if args.aic_count and args.qsa_variant in ("baseline", "author-cube"):
         parser.error("--aic-count requires an AIV or hybrid variant")
     if args.qsa_variant.startswith("old-"):
-        if args.dynamic and args.qsa_variant not in ("old-schedule", "old-schedule-tail"):
+        if args.dynamic and args.qsa_variant not in ("old-schedule", "old-schedule-tail", "old-schedule-tail-late"):
             parser.error("only old-schedule and old-schedule-tail support --dynamic")
         if args.pad_m != 16 or args.stages not in (None, 3):
             parser.error("the explicit old schedule requires --pad-m 16 and --stages 3")

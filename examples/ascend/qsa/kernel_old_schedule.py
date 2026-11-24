@@ -15,6 +15,7 @@ def qsa_old_schedule(
     lookahead_k=False,
     pair_chunks=False,
     skip_tail=False,
+    tail_sync_late=False,
     dynamic_shape=False,
 ):
     if direct_k and prefetch:
@@ -34,6 +35,10 @@ def qsa_old_schedule(
         prelude = "#define QSA_PAIR_CHUNKS\n" + prelude
     if skip_tail:
         prelude = "#define QSA_SKIP_TAIL\n" + prelude
+    if tail_sync_late:
+        if not skip_tail:
+            raise ValueError("Late tail synchronization requires tail skipping")
+        prelude = "#define QSA_DELAY_TAIL_SYNC\n" + prelude
     if dynamic_shape:
         # Keep the 17-tile schedule and persistent block count fixed. Only
         # the packed task count and the last full KV quad are runtime values.

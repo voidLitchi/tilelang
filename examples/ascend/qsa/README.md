@@ -96,6 +96,18 @@ Python API. The comparison script selects 28 by default for old variants.
 It also selects `pad-m=16` and `stages=3` for old variants, so those two flags
 are optional unless an explicit incompatible value is being diagnosed.
 
+`old-schedule-tail-late` is an experimental synchronization variant. It issues
+the first 64-row tail chunk with safe clamped indices, then waits for `Valid`
+before the second chunk. This keeps the precision fence while allowing part of
+the tail gather to overlap the `Valid` DMA:
+
+```bash
+python -m examples.ascend.qsa.compare_gbsa \
+  --qsa-variant old-schedule-tail-late --aic-count 28 \
+  --batch 1 --queries 4096 --kv 32768 --check --check-rows 0 \
+  --scope prepared --repeat 20
+```
+
 For a single Qwen-size dynamic invocation, use:
 
 ```bash

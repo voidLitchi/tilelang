@@ -344,6 +344,11 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             // Valid for this tile was loaded into the matching parity slot
             // before this gather. Do not add another GM transaction here.
             skip_invalid = (((task_block_1 - 2) % 17) == 16);
+#ifdef QSA_DELAY_TAIL_SYNC
+            // Let the first 64-row chunk overlap the Valid DMA. The second
+            // chunk is the first one whose scalar Valid reads need the fence.
+            skip_invalid = skip_invalid && (chunk == 1);
+#endif
 #endif
             int32_t valid_quad = 1;
 #ifdef QSA_SKIP_TAIL
@@ -432,8 +437,15 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             }
 #ifdef QSA_SKIP_TAIL
             if (chunk_1 == 0 && quad_1 == 0 && (task_block_1 - 1) % 17 == 16) {
+#ifndef QSA_DELAY_TAIL_SYNC
+              asc_sync_wait(PIPE_MTE2, PIPE_S, static_cast<event_t>(2 + ((task_block_1 + 1) & 1)));
+#endif
+            }
+#ifdef QSA_DELAY_TAIL_SYNC
+            if (chunk_1 == 1 && quad_1 == 0 && (task_block_1 - 1) % 17 == 16) {
               asc_sync_wait(PIPE_MTE2, PIPE_S, static_cast<event_t>(2 + ((task_block_1 + 1) & 1)));
             }
+#endif
 #endif
             if (Prefetch && CoreCount && chunk_1 == 0 && quad_1 == 0 && (task_block_1 - 1) % 17 == 0) {
               asc_sync_wait(PIPE_MTE2, PIPE_S, static_cast<event_t>(((task_block_1 - 1) / 17) & 1));
@@ -445,6 +457,9 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
             bool skip_invalid_1 = false;
 #ifdef QSA_SKIP_TAIL
             skip_invalid_1 = (((task_block_1 - 1) % 17) == 16);
+#ifdef QSA_DELAY_TAIL_SYNC
+            skip_invalid_1 = skip_invalid_1 && (chunk_1 == 1);
+#endif
 #endif
             int32_t valid_quad_1 = 1;
 #ifdef QSA_SKIP_TAIL
@@ -534,6 +549,7 @@ __aicore__ inline void qsa_old_task(__ubuf__ uint8_t* buf_dyn_shmem, __gm__ int3
 #undef QSA_GATHER_SLOT
 #undef QSA_GATHER_QUADS
 #undef QSA_SKIP_TAIL
+#undef QSA_DELAY_TAIL_SYNC
 #undef QSA_K_OFFSET
 #undef QSA_V_READ_SLOT
 #undef QSA_V_WRITE_SLOT
