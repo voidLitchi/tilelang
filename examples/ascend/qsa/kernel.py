@@ -3,7 +3,6 @@
 import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
 from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_major_k_layout
-from tvm import tirx
 
 NUM_HEADS = 24
 NUM_KV_HEADS = 2
@@ -18,11 +17,6 @@ SUPPORTED_AIC_COUNTS = (28, 32, 36)
 # SIMD reduction state uses one 64-element register per field.
 MAX, SUM, ALPHA, OLD_MAX = 0, 64, 128, 192
 INDEX, VALID = 0, 256
-
-
-def _op(name, *args):
-    """Emit a registered Ascend tile intrinsic with explicit instruction operands."""
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_" + name), *args)
 
 
 def _arrive(pipe, event):
@@ -147,19 +141,7 @@ def _cube(core, cores, tiles, q, kv_l1, q_l1, p_l1, qa, pa, kb, vb, qk_c, pv_c, 
                 if part == 1:
                     T.ascend_set_flag("MTE1_MTE2", 0)
                 T.ascend_wait_flag("MTE1_M", 0)
-                _op(
-                    "mad",
-                    T.access_ptr(qk_c[next_slot, 0, 0], "rw", extent=2048),
-                    T.access_ptr(qa[0, 0], "r", extent=2048),
-                    T.access_ptr(kb[0, 0], "r", extent=16384),
-                    16,
-                    128,
-                    128,
-                    0,
-                    1,
-                    0,
-                    part == 0,
-                )
+                T.gemm(qa, kb, qk_c[next_slot, :, :], transpose_B=True, clear_accum=(part == 0))
                 T.ascend_set_flag("M_MTE1", 0)
                 if part == 1:
                     T.ascend_set_flag("M_FIX", next_slot)
@@ -176,19 +158,7 @@ def _cube(core, cores, tiles, q, kv_l1, q_l1, p_l1, qa, pa, kb, vb, qk_c, pv_c, 
                 T.copy(p_l1[prev_slot, :, part * 64 : (part + 1) * 64], pa)
                 T.ascend_set_flag("MTE1_M", 1)
                 T.ascend_wait_flag("MTE1_M", 1)
-                _op(
-                    "mad",
-                    T.access_ptr(pv_c[prev_slot, 0, 0], "rw", extent=4096),
-                    T.access_ptr(pa[0, 0], "r", extent=1024),
-                    T.access_ptr(vb[0, 0], "r", extent=16384),
-                    16,
-                    64,
-                    256,
-                    0,
-                    1,
-                    0,
-                    part == 0,
-                )
+                T.gemm(pa, vb, pv_c[prev_slot, :, :], transpose_B=True, clear_accum=(part == 0))
                 T.ascend_set_flag("M_MTE1", 1)
                 if part == 1:
                     T.ascend_set_flag("M_FIX", 2)
