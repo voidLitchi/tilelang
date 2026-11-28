@@ -130,7 +130,7 @@ def gbsa_runner(ops, q, k, v, requests, blocks, counts):
         cu_seqlens_kv=torch.tensor((0, *kv_lens), device=device, dtype=torch.int64).cumsum(0),
     )
     lists = blocks.to(device).unsqueeze(0).expand(2, -1, -1).contiguous()
-    sizes = counts.to(device).unsqueeze(0).expand(2, -1, -1).contiguous()
+    sizes = counts.to(device).unsqueeze(0).expand(2, -1).contiguous()
     metadata = ops.generic_block_sparse_attention_metadata(
         lists, sizes, 24, 2, 256, [1, 4], max_seqlen_q=max(q_lens), max_seqlen_kv=max(kv_lens), **common
     )
